@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>SolarpunkServer</RootNamespace>
+    <UserSecretsId>solarpunk-server-dev</UserSecretsId>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="SolarpunkServer.Tests" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Extensions.Hosting" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+    <PackageReference Include="Serilog.Sinks.File" />
+    <PackageReference Include="Serilog.Formatting.Compact" />
+    <PackageReference Include="MessagePack" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Solarpunk.Protocol/Solarpunk.Protocol.csproj" />
+    <ProjectReference Include="../Solarpunk.Abstractions/Solarpunk.Abstractions.csproj" />
+    <ProjectReference Include="../Solarpunk.SourceQuery/Solarpunk.SourceQuery.csproj" />
+    <ProjectReference Include="../Solarpunk.Rcon/Solarpunk.Rcon.csproj" />
+    <ProjectReference Include="../Solarpunk.Persistence/Solarpunk.Persistence.csproj" />
+  </ItemGroup>
+</Project>

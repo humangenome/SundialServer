@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+out/
+publish/
+*.user
+.vs/
+.vscode/
+.idea/
+
+# Runtime artifacts (local dev runs)
+logs/
+data/
+chat-*.json
+roster.json
+motd.txt

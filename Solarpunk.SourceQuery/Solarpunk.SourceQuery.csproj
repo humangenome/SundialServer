@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Solarpunk.SourceQuery</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Solarpunk.Abstractions/Solarpunk.Abstractions.csproj" />
+  </ItemGroup>
+</Project>
