@@ -104,7 +104,7 @@ public sealed class SolarpunkServerOptions
     /// <summary>
     /// Take a snapshot zip of the SaveGames dir into <see cref="SaveDir"/>
     /// on every auto-save (via FileSystemWatcher). Useful for self-hosters
-    /// who want a rollback option. Hosting providers (e.g. SurvivalServers)
+    /// who want a rollback option. Hosting providers
     /// run their own backup chain and should set this to false to avoid
     /// disk churn — a 1-per-minute snapshot rate produces ~1500 zips and
     /// ~1 GB per gameserver per day.
