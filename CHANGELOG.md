@@ -3,6 +3,16 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 versioning is [SemVer](https://semver.org/).
 
+## [0.1.3] - 2026-06-11
+
+### Fixed
+
+- The in-game PLAYERS list and player nameplates now show each player's chosen
+  character name instead of a per-session machine identity, and the listen
+  host no longer appears as a phantom entry in the player list. The server
+  rewrites the replicated name table the in-game UI reads from, so the correct
+  names show on every connected client.
+
 ## [0.1.2] - 2026-06-11
 
 ### Fixed

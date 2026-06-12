@@ -61,6 +61,7 @@ local server_mods = {
     "SolarpunkAuth",
     "SolarpunkRoster",
     "SolarpunkChat",
+    "SolarpunkNoPhantomHost",   -- hide the listen-host's server-<hex> pawn + force remote display names
 }
 
 log("starting runtime script=" .. tostring(script_path) .. " mods_root=" .. tostring(mods_root))
