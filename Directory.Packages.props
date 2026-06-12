@@ -17,8 +17,8 @@
     <PackageVersion Include="Serilog.Formatting.Compact" Version="3.0.0" />
 
     <!-- Serialization (named-pipe IPC frames) -->
-    <PackageVersion Include="MessagePack" Version="3.0.300" />
-    <PackageVersion Include="MessagePackAnalyzer" Version="3.0.300" />
+    <PackageVersion Include="MessagePack" Version="3.1.7" />
+    <PackageVersion Include="MessagePackAnalyzer" Version="3.1.7" />
 
     <!-- Persistence -->
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="8.0.0" />

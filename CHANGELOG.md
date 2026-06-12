@@ -3,6 +3,22 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 versioning is [SemVer](https://semver.org/).
 
+## [0.1.4] - 2026-06-12
+
+### Fixed
+
+- The A2S (Source query) player list and the HTTP players endpoint now report
+  each player's chosen character name. The roster written by the in-game mod
+  stack is authoritative whenever it has entries; log-derived fallback entries
+  no longer merge in alongside it, and a machine-shaped session identity is
+  never published as a player name on the fallback path either.
+- The log-tail name cleaner strips the name-channel auth token, so a server
+  password can never appear in a published player list.
+
+### Security
+
+- Bumped MessagePack to 3.1.7 (GHSA-hv8m-jj95-wg3x).
+
 ## [0.1.3] - 2026-06-11
 
 ### Fixed

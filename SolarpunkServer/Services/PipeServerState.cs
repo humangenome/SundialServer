@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Solarpunk.Protocol;
 using Microsoft.Extensions.Logging;
 
@@ -52,10 +53,17 @@ public sealed class PipeServerState
     public int LastServerPasswordConfigured { get; set; }
     public int LastServerPasswordHookReady { get; set; }
 
-    // Cached player list shipped over the IPC PlayerListSnapshot frame.
-    // SourceQueryHostedService + the launcher's HTTP /players endpoint
-    // read from this. Plugin enumerates the game's PlayerController list and
-    // ships a snapshot every few seconds.
+    // Cached player list shipped by the SolarpunkRoster Lua mod via roster.json
+    // (RosterFileWatcherService). SourceQueryHostedService + the launcher's
+    // HTTP /players endpoint read from this.
+    //
+    // The roster is AUTHORITATIVE whenever it has entries: its names are the
+    // launcher character names (auth token stripped, identical to the save
+    // key derivation). The log-tail entries (_logPlayers) are a fallback for
+    // the roster-mod-down case only — merging the two double-counted every
+    // player whose log-derived name was the OSS Null machine identity
+    // (e.g. RYZEN3-PC-<hex>), which is also what leaked machine names into
+    // the A2S player list while /api/v1's roster row was already clean.
     private List<PlayerSnapshot> _players = new();
     private readonly Dictionary<string, PlayerSnapshot> _logPlayers = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _playersGate = new();
@@ -65,18 +73,12 @@ public sealed class PipeServerState
         {
             lock (_playersGate)
             {
-                var merged = new List<PlayerSnapshot>(_players.Count + _logPlayers.Count);
-                var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var player in _players.Concat(_logPlayers.Values))
-                {
-                    var id = player.SolarpunkUserId ?? "";
-                    var name = player.DisplayName ?? "";
-                    if (id.Length > 0 && !seenIds.Add(id)) continue;
-                    if (name.Length > 0 && !seenNames.Add(name)) continue;
-                    merged.Add(player);
-                }
-                return merged;
+                if (_players.Count > 0) return _players.ToList();
+                // Fallback path: machine-shaped OSS Null identities are
+                // connection plumbing, never display names.
+                return _logPlayers.Values
+                    .Where(p => !PlayerNameHeuristics.IsGeneratedPlayerName(p.DisplayName ?? ""))
+                    .ToList();
             }
         }
     }
@@ -157,6 +159,44 @@ public sealed class PipeServerState
         }
     }
 
+}
+
+/// <summary>
+/// Shared player-name heuristics. Under OSS=Null the engine derives the
+/// player name from the client machine name — those are connection plumbing,
+/// not display names; the launcher's ?Name=&lt;charname&gt; is the real identity.
+/// Shape contract is byte-identical with the Lua mods' is_phantom_name
+/// (SolarpunkNoPhantomHost): &lt;prefix&gt;-&lt;6+ hex&gt; where the prefix is the literal
+/// "server" or an UPPERCASE machine-name shape (e.g. RYZEN3-PC-680B752F44B1A),
+/// plus the hosting-provider prefixes the log tail filtered historically.
+/// </summary>
+internal static class PlayerNameHeuristics
+{
+    private static readonly Regex MachineShape = new(
+        @"^(?<prefix>[A-Za-z0-9_\-]+)-(?<hex>[0-9A-Fa-f]{6,})$",
+        RegexOptions.Compiled);
+
+    private static readonly Regex UppercasePrefix = new(
+        @"^[A-Z0-9_\-]+$",
+        RegexOptions.Compiled);
+
+    public static bool IsGeneratedPlayerName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        value = value.Trim();
+        if (value.StartsWith("ns", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("WIN-", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("DESKTOP-", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("LAPTOP-", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        var m = MachineShape.Match(value);
+        if (!m.Success) return false;
+        var prefix = m.Groups["prefix"].Value;
+        return prefix.Equals("server", StringComparison.Ordinal)
+               || UppercasePrefix.IsMatch(prefix);
+    }
 }
 
 /// <summary>

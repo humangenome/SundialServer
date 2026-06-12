@@ -313,7 +313,15 @@ public sealed class SpLogTailService : BackgroundService
             _state.ClearLogPlayersIfOnlyOne();
     }
 
-    private static string CleanName(string value) => value.Trim().Trim('"');
+    // Trim log decoration AND strip the SolarpunkAuth name-channel token
+    // (?Name=<char>__SPPW__<pw>): a Login-request line carries the raw value,
+    // and the password half must never reach any published player list.
+    private static string CleanName(string value)
+    {
+        var v = value.Trim().Trim('"');
+        var i = v.IndexOf("__SPPW__", StringComparison.Ordinal);
+        return i >= 0 ? v[..i] : v;
+    }
 
     internal static bool TryExtractAcceptedAddress(string line, out string address)
     {
@@ -335,15 +343,12 @@ public sealed class SpLogTailService : BackgroundService
 
     // Under OSS=Null the engine derives the player name from the client
     // machine name (e.g. "ns567705-<hash>", "WIN-...", "DESKTOP-...",
-    // "LAPTOP-<hex>"). Those are connection plumbing, not display names —
-    // the launcher's ?Name=<charname> is the real identity. Filter the
-    // machine-shaped ones from the visible roster.
+    // "RYZEN3-PC-<hex>"). Those are connection plumbing, not display names —
+    // the launcher's ?Name=<charname> is the real identity. The shape check
+    // lives in PlayerNameHeuristics so the A2S/HTTP merge path applies the
+    // exact same rule.
     private static bool IsGeneratedPlayerName(string value)
-    {
-        return value.StartsWith("ns", StringComparison.OrdinalIgnoreCase)
-               || value.StartsWith("WIN-", StringComparison.OrdinalIgnoreCase)
-               || value.StartsWith("DESKTOP-", StringComparison.OrdinalIgnoreCase);
-    }
+        => PlayerNameHeuristics.IsGeneratedPlayerName(value);
 
     private sealed record PendingLogin(string PlayerId, string DisplayName, string? Address);
 }
