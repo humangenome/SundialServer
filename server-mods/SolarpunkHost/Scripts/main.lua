@@ -167,6 +167,7 @@ end
 
 local hosted = false
 local pending = {}     -- [controller addr] = countdown until BeginLoadData re-issue
+local loaded_sid = {}  -- [controller addr] = last synthetic id we re-loaded under
 
 local function crc32(s)
     local c = 0xFFFFFFFF
@@ -211,25 +212,53 @@ local function isSynth(s) return s ~= nil and s:find("^765611900%d") ~= nil end
 local function tick()
     local cs = SP.controllers()
     if not cs then return end
+    local live = {}
     for _, c in ipairs(cs) do
         if c and c:IsValid() and not c:IsLocalPlayerController() then
             local k = akey(c)
+            live[k] = true
             -- never touch a controller auth already kicked (dying object)
             if not SP.kicked[k] then
                 local nm = pname(c)
                 if nm ~= "" then
                     local sid = synthId(nm)
                     pcall(function() c.UniquePlayerID = sid end)        -- save key (per-player)
+                    -- The launcher/client name keeper can correct the PlayerState name
+                    -- after the game's first BeginLoadData call. When that happens,
+                    -- re-load under the corrected character id so the load key and
+                    -- save key do not split for the session.
+                    if loaded_sid[k] ~= sid and pending[k] == nil then
+                        pending[k] = 6
+                        if loaded_sid[k] then
+                            log("save identity changed [" .. tostring(k) .. "]: " ..
+                                tostring(loaded_sid[k]) .. " -> " .. sid ..
+                                " (name=" .. nm .. "); re-arming BeginLoadData")
+                        end
+                    end
                     if pending[k] then
                         pending[k] = pending[k] - 1
                         if pending[k] <= 0 then
                             pending[k] = nil
-                            pcall(function() c:BeginLoadData(sid) end)  -- load key, lands last
+                            local ok = pcall(function() c:BeginLoadData(sid) end) -- load key, lands last
+                            if ok then
+                                loaded_sid[k] = sid
+                                log("BeginLoadData re-issued [" .. tostring(k) .. "] sid=" .. sid ..
+                                    " name=" .. nm)
+                            else
+                                log("WARN: BeginLoadData re-issue failed [" .. tostring(k) ..
+                                    "] sid=" .. sid .. " name=" .. nm)
+                            end
                         end
                     end
                 end
             end
         end
+    end
+    for k in pairs(loaded_sid) do
+        if not live[k] then loaded_sid[k] = nil end
+    end
+    for k in pairs(pending) do
+        if not live[k] then pending[k] = nil end
     end
 end
 
