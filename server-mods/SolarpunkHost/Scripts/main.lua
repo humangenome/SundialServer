@@ -220,6 +220,26 @@ local function log_saveish_string_props(obj, label)
     end
 end
 
+local function param_string(p)
+    if type(p) == "string" then return p end
+    local v
+    if not pcall(function() v = p:get() end) then return nil end
+    if v == nil then return nil end
+    if type(v) == "string" then return v end
+    local s
+    if pcall(function() s = v:ToString() end) and type(s) == "string" then return s end
+    return nil
+end
+
+local function rewrite_world_slot_param(p, label)
+    local before = param_string(p)
+    if not before or before == "" or before == WORLD_NAME then return end
+    if before == "Options" or before == "gp_data" then return end
+    local ok = pcall(function() p:set(WORLD_NAME) end)
+    log("slot rewrite " .. label .. ": " .. tostring(before) .. " -> " .. WORLD_NAME ..
+        " ok=" .. tostring(ok) .. " after=" .. tostring(param_string(p)))
+end
+
 -- Shared scheduler/state from SolarpunkServerRuntime (see the STABILITY
 -- CONTRACT comment there). All periodic work below runs as game-thread
 -- scheduler tasks — no mod-owned LoopAsync, no async-thread native access.
@@ -368,6 +388,34 @@ local function try_install_bld_hook()
     end
 end
 
+local save_hooked, save_hook_tries = false, 0
+local function try_install_save_slot_hooks()
+    if save_hooked then return end
+    save_hook_tries = save_hook_tries + 1
+    local any = false
+    local function hook(path, pre)
+        local ok = pcall(function() RegisterHook(path, pre, function() end) end)
+        log("save-slot hook " .. path .. " ok=" .. tostring(ok))
+        if ok then any = true end
+    end
+    hook("/Script/Engine.GameplayStatics:DoesSaveGameExist", function(_, slot_name)
+        rewrite_world_slot_param(slot_name, "DoesSaveGameExist")
+    end)
+    hook("/Script/Engine.GameplayStatics:LoadGameFromSlot", function(_, slot_name)
+        rewrite_world_slot_param(slot_name, "LoadGameFromSlot")
+    end)
+    hook("/Script/Engine.GameplayStatics:SaveGameToSlot", function(_, save_obj, slot_name)
+        rewrite_world_slot_param(slot_name, "SaveGameToSlot")
+    end)
+    if any then
+        save_hooked = true
+        log("save-slot hooks installed (attempt " .. save_hook_tries .. ")")
+    elseif save_hook_tries >= 60 then
+        save_hooked = true
+        log("save-slot hooks FAILED after " .. save_hook_tries .. " tries")
+    end
+end
+
 -- Boot: GI found -> world name -> transport swap -> host. All on the game
 -- thread via the shared scheduler (FindFirstOf/RegisterHook off-thread was
 -- part of the crash surface).
@@ -385,6 +433,7 @@ SP.every("host-boot", 1000, 0, function()
     log_saveish_string_props(gi, "GameInstance.before")
     set_world_slot_fields(gi, "GameInstance")
     log_saveish_string_props(gi, "GameInstance.after")
+    try_install_save_slot_hooks()
 
     -- transport: force IpNetDriver so the headless host binds real UDP
     local eng = FindFirstOf("GameEngine")
@@ -411,6 +460,11 @@ end)
 SP.every("host-bld-hook", 1000, 250, function()
     if not hosted then return end
     try_install_bld_hook()
+end)
+
+SP.every("host-save-slot-hooks", 1000, 250, function()
+    if not hosted then return end
+    try_install_save_slot_hooks()
 end)
 
 -- net-id enforcement tick (every scheduler tick = 250ms, unchanged cadence)
