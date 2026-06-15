@@ -359,21 +359,36 @@ local function collect_named_props(owner, label, predicate, out)
     end
 end
 local field_stamp_log = {}
+local function reflection_prop(obj, field)
+    local refl
+    if not pcall(function() refl = obj:Reflection() end) or not validish(refl) then return nil end
+    local prop
+    if not pcall(function() prop = refl:GetProperty(field) end) or not validish(prop) then return nil end
+    return prop
+end
+local function import_text_property(obj, prop, field, value, label, only_blank)
+    if not validish(obj) or not validish(prop) then return false end
+    local before = read_string_prop(obj, field)
+    if only_blank and not is_blank_id(before) then return false end
+    local ok = pcall(function()
+        prop:ImportText(tostring(value), prop:ContainerPtrToValuePtr(obj), 0, obj)
+    end)
+    if not ok then return false end
+    local after = read_string_prop(obj, field)
+    local key = label .. "." .. field .. "=" .. tostring(value)
+    if not field_stamp_log[key] then
+        field_stamp_log[key] = true
+        log(label .. "." .. field .. "=" .. tostring(after) .. " import=true")
+    end
+    return true
+end
 local function set_string_fields(obj, fields, value, label, only_blank)
     if not validish(obj) then return false end
     local did = false
     for _, field in ipairs(fields) do
-        local before = read_string_prop(obj, field)
-        if not only_blank or is_blank_id(before) then
-            local ok = pcall(function() obj[field] = value end)
-            if ok then
-                did = true
-                local key = label .. "." .. field .. "=" .. tostring(value)
-                if not field_stamp_log[key] then
-                    field_stamp_log[key] = true
-                    log(label .. "." .. field .. "=" .. tostring(read_string_prop(obj, field)))
-                end
-            end
+        local prop = reflection_prop(obj, field)
+        if prop then
+            did = import_text_property(obj, prop, field, value, label, only_blank) or did
         end
     end
     return did
@@ -396,15 +411,7 @@ local function set_matching_string_props(obj, predicate, value, label, only_blan
                     if not predicate(pname:lower()) then return end
                     local before = read_string_prop(obj, pname)
                     if only_blank and not is_blank_id(before) then return end
-                    local ok = pcall(function() obj[pname] = value end)
-                    if ok then
-                        did = true
-                        local key = label .. "." .. pname .. "=" .. tostring(value)
-                        if not field_stamp_log[key] then
-                            field_stamp_log[key] = true
-                            log(label .. "." .. pname .. "=" .. tostring(read_string_prop(obj, pname)))
-                        end
-                    end
+                    did = import_text_property(obj, prop, pname, value, label, only_blank) or did
                 end)
             end)
         end)
