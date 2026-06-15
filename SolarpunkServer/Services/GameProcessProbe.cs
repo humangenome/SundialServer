@@ -44,11 +44,61 @@ public static class GameProcessProbe
                 Serilog.Log.Debug("GameProcessProbe: pid {Pid} has exited -> not alive", pid);
                 return false;
             }
-            var name = p.ProcessName;
-            var match = name.IndexOf(ExeNameFragment, StringComparison.OrdinalIgnoreCase) >= 0;
-            Serilog.Log.Debug("GameProcessProbe: pid {Pid} name='{Name}' nameMatch={Match} -> {Alive}",
-                pid, name, match, match);
-            return match;
+
+            try
+            {
+                var name = p.ProcessName;
+                var nameMatch = name.IndexOf(ExeNameFragment, StringComparison.OrdinalIgnoreCase) >= 0;
+                if (nameMatch)
+                {
+                    Serilog.Log.Debug("GameProcessProbe: pid {Pid} name='{Name}' -> alive", pid, name);
+                    return true;
+                }
+                Serilog.Log.Debug("GameProcessProbe: pid {Pid} name='{Name}' did not match", pid, name);
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Debug("GameProcessProbe: pid {Pid} ProcessName unavailable ({Ex})", pid, ex.GetType().Name);
+            }
+
+            try
+            {
+                var exe = p.MainModule?.FileName ?? "";
+                var pathMatch = exe.IndexOf(ExeNameFragment, StringComparison.OrdinalIgnoreCase) >= 0;
+                if (pathMatch)
+                {
+                    Serilog.Log.Debug("GameProcessProbe: pid {Pid} exe='{Exe}' -> alive", pid, exe);
+                    return true;
+                }
+                Serilog.Log.Debug("GameProcessProbe: pid {Pid} exe='{Exe}' did not match", pid, exe);
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Debug("GameProcessProbe: pid {Pid} MainModule unavailable ({Ex})", pid, ex.GetType().Name);
+            }
+
+            try
+            {
+                var pidFileWritten = File.GetLastWriteTimeUtc(pidFile);
+                var processStarted = p.StartTime.ToUniversalTime();
+                if (processStarted <= pidFileWritten.AddSeconds(10))
+                {
+                    Serilog.Log.Debug(
+                        "GameProcessProbe: pid {Pid} alive and start={Start:o} <= pidfile={PidFileTime:o}+10s -> alive",
+                        pid, processStarted, pidFileWritten);
+                    return true;
+                }
+
+                Serilog.Log.Debug(
+                    "GameProcessProbe: pid {Pid} start={Start:o} is newer than stale pidfile={PidFileTime:o} -> not alive",
+                    pid, processStarted, pidFileWritten);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Debug("GameProcessProbe: pid {Pid} fallback timestamp probe failed ({Ex}) -> not alive", pid, ex.GetType().Name);
+                return false;
+            }
         }
         catch (Exception ex)
         {
