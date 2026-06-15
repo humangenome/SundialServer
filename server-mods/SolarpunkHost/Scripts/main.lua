@@ -296,6 +296,46 @@ local function akey(c)
     return k
 end
 local function isSynth(s) return s ~= nil and s:find("^765611900%d") ~= nil end
+local function pawn_of(c)
+    if not (c and c:IsValid()) then return nil end
+    local pawn
+    pcall(function() pawn = c.Pawn end)
+    if pawn and pawn:IsValid() then return pawn end
+    pcall(function() pawn = c:K2_GetPawn() end)
+    if pawn and pawn:IsValid() then return pawn end
+    return nil
+end
+local stamped_log = {}
+local function stamp_unique_player_id(c, sid, why)
+    if not (c and c:IsValid()) or not isSynth(sid) then return false end
+    local did = false
+    local ok_pc = pcall(function() c.UniquePlayerID = sid end)
+    did = did or ok_pc
+    local pawn = pawn_of(c)
+    local ok_pawn = false
+    if pawn then
+        ok_pawn = pcall(function() pawn.UniquePlayerID = sid end)
+        did = did or ok_pawn
+    end
+    local ok_ps = false
+    pcall(function()
+        local ps = c.PlayerState
+        if ps and ps:IsValid() then
+            ok_ps = pcall(function() ps.UniquePlayerID = sid end)
+            did = did or ok_ps
+        end
+    end)
+    local key = tostring(akey(c)) .. ":" .. sid .. ":" .. tostring(why or "")
+    if did and not stamped_log[key] then
+        stamped_log[key] = true
+        log("UniquePlayerID stamped [" .. tostring(akey(c)) .. "] sid=" .. sid ..
+            " why=" .. tostring(why or "") ..
+            " pc=" .. tostring(ok_pc) ..
+            " pawn=" .. tostring(ok_pawn) ..
+            " ps=" .. tostring(ok_ps))
+    end
+    return did
+end
 
 local function tick()
     local cs = SP.controllers()
@@ -310,7 +350,7 @@ local function tick()
                 local nm = pname(c)
                 if nm ~= "" then
                     local sid = synthId(nm)
-                    pcall(function() c.UniquePlayerID = sid end)        -- save key (per-player)
+                    stamp_unique_player_id(c, sid, "tick") -- save key (per-player)
                     -- The launcher/client name keeper can correct the PlayerState name
                     -- after the game's first BeginLoadData call. When that happens,
                     -- re-load under the corrected character id so the load key and
@@ -388,6 +428,33 @@ local function try_install_bld_hook()
     end
 end
 
+local save_player_hooked, save_player_tries = false, 0
+local function try_install_save_player_hook()
+    if save_player_hooked then return end
+    save_player_tries = save_player_tries + 1
+    local ok = pcall(function()
+        RegisterHook(BLD_CLASS .. ":SERVER_SavePlayerdata", function(self)
+            pcall(function()
+                local c = self:get()
+                if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
+                local k = akey(c)
+                if SP.kicked[k] then return end
+                local nm = pname(c)
+                if nm == "" then return end
+                stamp_unique_player_id(c, synthId(nm), "pre-save")
+            end)
+        end, function() end)
+    end)
+    if ok then
+        save_player_hooked = true
+        log("SERVER_SavePlayerdata hook installed (attempt " .. save_player_tries .. ")")
+    elseif save_player_tries >= 60 then
+        save_player_hooked = true
+        log("SERVER_SavePlayerdata hook FAILED after " .. save_player_tries .. " tries")
+    end
+end
+
 local save_hooked, save_hook_tries = false, 0
 local function try_install_save_slot_hooks()
     if save_hooked then return end
@@ -460,6 +527,7 @@ end)
 SP.every("host-bld-hook", 1000, 250, function()
     if not hosted then return end
     try_install_bld_hook()
+    try_install_save_player_hook()
 end)
 
 SP.every("host-save-slot-hooks", 1000, 250, function()
