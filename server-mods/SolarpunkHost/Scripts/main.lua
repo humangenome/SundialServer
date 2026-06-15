@@ -422,6 +422,93 @@ local function set_matching_string_props(obj, predicate, value, label, only_blan
     end
     return did
 end
+local function struct_field_string(s, field)
+    if not validish(s) then return nil end
+    local v
+    if not pcall(function() v = s[field] end) then return nil end
+    if v == nil then return nil end
+    if type(v) == "string" then return v end
+    local out
+    if pcall(function() out = v:ToString() end) and type(out) == "string" then return out end
+    return tostring(v)
+end
+local function set_struct_string_fields(s, fields, value, label, only_blank)
+    if not validish(s) then return false end
+    local did = false
+    for _, field in ipairs(fields) do
+        local before = struct_field_string(s, field)
+        if not only_blank or is_blank_id(before) then
+            local ok = pcall(function() s[field] = value end)
+            local after = struct_field_string(s, field)
+            if ok and after == tostring(value) then
+                local key = label .. "." .. field .. "=" .. tostring(value)
+                if not field_stamp_log[key] then
+                    field_stamp_log[key] = true
+                    log(label .. "." .. field .. "=" .. tostring(after) .. " struct=true")
+                end
+                did = true
+            end
+        end
+    end
+    return did
+end
+local function prop_name(prop)
+    local name
+    if pcall(function() name = prop:GetFName():ToString() end) and name and name ~= "" then return name end
+    if pcall(function() name = prop:GetName() end) and name and name ~= "" then return name end
+    return nil
+end
+local function prop_kind(prop)
+    local full = tostring(prop)
+    pcall(function() full = tostring(prop:GetFullName()) end)
+    return full:match("^(%a+)Property") or full
+end
+local function is_player_id_field(name)
+    local lower = tostring(name or ""):lower()
+    return lower == "id" or lower:match("^id_") or lower:find("uniqueplayerid", 1, true) or
+        lower:find("playerid", 1, true) or lower:find("player_id", 1, true)
+end
+local function set_struct_matching_string_props(s, predicate, value, label, only_blank)
+    if not validish(s) then return false end
+    local did = false
+    local logged_any = false
+    local ok_iter = pcall(function()
+        s:ForEachProperty(function(prop)
+            local pname = prop_name(prop)
+            local kind = prop_kind(prop)
+            if pname and not logged_any then
+                logged_any = true
+                log(label .. ".field-scan first=" .. pname .. " kind=" .. kind)
+            end
+            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and predicate(pname, kind) then
+                local before = struct_field_string(s, pname)
+                if not only_blank or is_blank_id(before) then
+                    local ok = pcall(function() s[pname] = value end)
+                    local after = struct_field_string(s, pname)
+                    if ok and after == tostring(value) then
+                        local key = label .. "." .. pname .. "=" .. tostring(value)
+                        if not field_stamp_log[key] then
+                            field_stamp_log[key] = true
+                            log(label .. "." .. pname .. "=" .. tostring(after) .. " struct-scan=true kind=" .. kind)
+                        end
+                        did = true
+                    else
+                        log(label .. "." .. pname .. " struct-scan failed ok=" .. tostring(ok) ..
+                            " before=" .. tostring(before) .. " after=" .. tostring(after) .. " kind=" .. kind)
+                    end
+                end
+            end
+        end)
+    end)
+    if not ok_iter then
+        local key = label .. ".field-scan-unavailable"
+        if not field_stamp_log[key] then
+            field_stamp_log[key] = true
+            log(label .. ".field-scan unavailable")
+        end
+    end
+    return did
+end
 local function stable_inventory_id(sid)
     return string.format("%08x%08x%08x%08x",
         crc32("inv-a:" .. sid), crc32("inv-b:" .. sid),
@@ -449,6 +536,17 @@ local inventory_prop_names = {
     "InventorySystem", "Inventory", "InventoryComponent", "PlayerInventory",
     "MainInventory", "BackpackInventory", "HotbarInventory",
 }
+local function stamp_playerdata_param(param, sid, why)
+    if not isSynth(sid) or param == nil then return false end
+    local s
+    if not pcall(function() s = param:get() end) or not validish(s) then return false end
+    local did = set_struct_string_fields(s, playerdata_fields, sid,
+        "Playerdata param stamped why=" .. tostring(why or ""), false)
+    did = set_struct_matching_string_props(s, is_player_id_field, sid,
+        "Playerdata param stamped why=" .. tostring(why or ""), false) or did
+    if did then pcall(function() param:set(s) end) end
+    return did
+end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
     local owners = {
@@ -672,25 +770,42 @@ end
 local function host_save_sid()
     return synthId("host:" .. WORLD_NAME)
 end
+local save_reentry = {}
+local function save_sid_for_controller(c)
+    if not (c and c:IsValid()) then return nil end
+    if c:IsLocalPlayerController() then
+        return single_remote_sid() or host_save_sid()
+    end
+    local nm = pname(c)
+    if nm == "" then return nil end
+    return synthId(nm)
+end
+local function reissue_corrected_player_save(c, k, sid, playerdata, why)
+    if save_reentry[k] or playerdata == nil then return false end
+    local s
+    if not pcall(function() s = playerdata:get() end) or not validish(s) then return false end
+    save_reentry[k] = true
+    local ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(s) end)
+    save_reentry[k] = nil
+    log("SERVER_SavePlayerdata corrected reissue why=" .. tostring(why or "") ..
+        " sid=" .. tostring(sid) .. " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
+    return ok2
+end
 local function try_install_save_player_hook()
     if save_player_hooked then return end
     save_player_tries = save_player_tries + 1
     local ok = pcall(function()
-        RegisterHook(BLD_CLASS .. ":SERVER_SavePlayerdata", function(self)
+        RegisterHook(BLD_CLASS .. ":SERVER_SavePlayerdata", function(self, playerdata)
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
                 local k = akey(c)
                 if SP.kicked[k] then return end
-                local sid
-                if c:IsLocalPlayerController() then
-                    sid = single_remote_sid() or host_save_sid()
-                else
-                    local nm = pname(c)
-                    if nm == "" then return end
-                    sid = synthId(nm)
-                end
+                local sid = save_sid_for_controller(c)
+                if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
+                local did = stamp_playerdata_param(playerdata, sid, "pre-save")
+                if did then reissue_corrected_player_save(c, k, sid, playerdata, "pre-save") end
             end)
         end, function()
             pcall(function() force_save_to_disk("post-player-save") end)
