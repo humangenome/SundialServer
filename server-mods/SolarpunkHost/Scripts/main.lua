@@ -152,6 +152,74 @@ local function write_host_status(hosting, reason)
 end
 write_host_status(false, "booting")
 
+local WORLD_SLOT_FIELDS = {
+    "WorldSaveName",
+    "WorldName",
+    "SaveGameName",
+    "SaveGameSlotName",
+    "SaveSlotName",
+    "SlotName",
+    "SlotNameStr",
+    "CurrentSaveName",
+    "CurrentSaveGameName",
+    "CurrentSaveSlotName",
+    "SelectedSaveName",
+    "SelectedSaveGameName",
+    "SelectedSaveSlotName",
+    "LoadedSaveName",
+}
+
+local function read_string_prop(obj, pname)
+    local v
+    if not pcall(function() v = obj[pname] end) then return nil end
+    if v == nil then return nil end
+    if type(v) == "string" then return v end
+    local s
+    if pcall(function() s = v:ToString() end) and type(s) == "string" then return s end
+    return nil
+end
+
+local function set_world_slot_fields(obj, label)
+    if not (obj and obj:IsValid()) then return end
+    for _, pname in ipairs(WORLD_SLOT_FIELDS) do
+        local ok = pcall(function() obj[pname] = WORLD_NAME end)
+        if ok then
+            log(label .. "." .. pname .. "=" .. tostring(read_string_prop(obj, pname)))
+        end
+    end
+end
+
+local function log_saveish_string_props(obj, label)
+    if not (obj and obj:IsValid()) then return end
+    local cls
+    if not pcall(function() cls = obj:GetClass() end) or not (cls and cls:IsValid()) then return end
+    local guard = 0
+    while cls and cls:IsValid() and guard < 24 do
+        guard = guard + 1
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                pcall(function()
+                    local pfull = tostring(prop:GetFullName())
+                    local kind = pfull:match("^(%a+)Property")
+                    if kind == "Str" or kind == "Name" or kind == "Text" then
+                        local pname
+                        pcall(function() pname = prop:GetFName():ToString() end)
+                        local lower = pname and pname:lower() or ""
+                        if lower:find("save", 1, true) or lower:find("slot", 1, true) or
+                            lower:find("world", 1, true) or lower:find("name", 1, true) then
+                            log(label .. ".prop." .. pname .. "=" .. tostring(read_string_prop(obj, pname)))
+                        end
+                    end
+                end)
+            end)
+        end)
+        local sup
+        if not pcall(function() sup = cls:GetSuperStruct() end) then break end
+        if not (sup and sup:IsValid()) then break end
+        cls = sup
+    end
+end
+
 -- Shared scheduler/state from SolarpunkServerRuntime (see the STABILITY
 -- CONTRACT comment there). All periodic work below runs as game-thread
 -- scheduler tasks — no mod-owned LoopAsync, no async-thread native access.
@@ -314,6 +382,9 @@ SP.every("host-boot", 1000, 0, function()
     local ok_w, err_w = pcall(function() gi.WorldSaveName = WORLD_NAME end)
     log("WorldSaveName=" .. WORLD_NAME .. " set ok=" .. tostring(ok_w) ..
         (ok_w and "" or (" err=" .. tostring(err_w))))
+    log_saveish_string_props(gi, "GameInstance.before")
+    set_world_slot_fields(gi, "GameInstance")
+    log_saveish_string_props(gi, "GameInstance.after")
 
     -- transport: force IpNetDriver so the headless host binds real UDP
     local eng = FindFirstOf("GameEngine")
