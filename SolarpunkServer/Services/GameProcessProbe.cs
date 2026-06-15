@@ -77,28 +77,13 @@ public static class GameProcessProbe
                 Serilog.Log.Debug("GameProcessProbe: pid {Pid} MainModule unavailable ({Ex})", pid, ex.GetType().Name);
             }
 
-            try
-            {
-                var pidFileWritten = File.GetLastWriteTimeUtc(pidFile);
-                var processStarted = p.StartTime.ToUniversalTime();
-                if (processStarted <= pidFileWritten.AddSeconds(10))
-                {
-                    Serilog.Log.Debug(
-                        "GameProcessProbe: pid {Pid} alive and start={Start:o} <= pidfile={PidFileTime:o}+10s -> alive",
-                        pid, processStarted, pidFileWritten);
-                    return true;
-                }
-
-                Serilog.Log.Debug(
-                    "GameProcessProbe: pid {Pid} start={Start:o} is newer than stale pidfile={PidFileTime:o} -> not alive",
-                    pid, processStarted, pidFileWritten);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Serilog.Log.Debug("GameProcessProbe: pid {Pid} fallback timestamp probe failed ({Ex}) -> not alive", pid, ex.GetType().Name);
-                return false;
-            }
+            // Health is a read-only "is this instance probably up?" signal. The
+            // restart/restore kill paths do stricter path ownership checks before
+            // touching a process. Here, a live PID from this instance's pidfile is
+            // enough to avoid false-down panel/launcher status on hosts where
+            // ProcessName/MainModule reads intermittently fail under Windows.
+            Serilog.Log.Debug("GameProcessProbe: pid {Pid} exists but name/path validation was unavailable or inconclusive -> alive", pid);
+            return true;
         }
         catch (Exception ex)
         {
