@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdarg>
+#include <cstring>
 #include <cwchar>
 #include "MinHook.h"
 
@@ -122,18 +123,63 @@ static bool mint_from_str(const wchar_t* idstr, FSharedPtr* out) {
     return out->Object != nullptr;
 }
 
+static bool read_identity_file(wchar_t* idstr, int idLen, wchar_t* seed, int seedLen) {
+    wchar_t appdata[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+
+    wchar_t path[MAX_PATH];
+    swprintf(path, MAX_PATH, L"%ls\\Solarpunk\\client-identity.txt", appdata);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"rb") != 0 || !f) return false;
+
+    char buf[256] = {0};
+    size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (got == 0) return false;
+    buf[got] = 0;
+
+    char steam[40] = {0};
+    char hash[32] = {0};
+    if (sscanf(buf, "STEAM %39[0-9] %31[0-9A-Fa-f]", steam, hash) < 1)
+        return false;
+    size_t len = strlen(steam);
+    if (len < 17 || len >= (size_t)idLen) return false;
+    for (size_t i = 0; i < len; ++i) {
+        if (steam[i] < '0' || steam[i] > '9') return false;
+        idstr[i] = (wchar_t)steam[i];
+    }
+    idstr[len] = 0;
+    const wchar_t* prefix = L"client-identity:";
+    wcsncpy_s(seed, seedLen, prefix, _TRUNCATE);
+    size_t off = wcslen(seed);
+    const char* h = hash[0] ? hash : "nohash";
+    for (size_t i = 0; h[i] && off + i + 1 < (size_t)seedLen; ++i)
+        seed[off + i] = (wchar_t)h[i];
+    seed[seedLen - 1] = 0;
+    return true;
+}
+
 // CLIENT-side: the local player's preferred id is what gets SENT in the NMT_Login handshake. Call the
-// original (constructs the repl in sret), then replace its inner id with a minted Steam id derived
-// from the machine name (stable per machine; in prod the launcher fixes ?Name for per-character ids).
+// original (constructs the repl in sret), then replace its inner id with the launcher-written
+// per-character identity. Falling back to the machine name is only for diagnostics/manual dev launches;
+// the launcher requires this hook to load before it writes the connect target.
 static void* __fastcall hk_GetPreferredUniqueNetId(void* self, void* sretRepl) {
     void* r = g_origGetPreferred(self, sretRepl);
-    wchar_t comp[160]; DWORD n = 160;
-    if (!GetComputerNameW(comp, &n)) wcscpy_s(comp, L"sp-machine");
-    wchar_t idstr[32]; synth_str(comp, idstr, 32);
+    wchar_t seed[180] = L"";
+    wchar_t idstr[32] = L"";
+    bool fromIdentity = read_identity_file(idstr, 32, seed, 180);
+    if (!fromIdentity) {
+        wchar_t comp[160]; DWORD n = 160;
+        if (!GetComputerNameW(comp, &n)) wcscpy_s(comp, L"sp-machine");
+        synth_str(comp, idstr, 32);
+        swprintf(seed, 180, L"fallback-machine:%ls", comp);
+    }
     FSharedPtr shared{ nullptr, nullptr };
     if (g_setUniqueNetId && mint_from_str(idstr, &shared)) {
         g_setUniqueNetId(sretRepl, &shared);
-        plog("GetPreferredUniqueNetId -> injected id=%ls (seed=%ls)\n", idstr, comp);
+        plog("GetPreferredUniqueNetId -> injected id=%ls (seed=%ls identity=%d)\n",
+             idstr, seed, fromIdentity ? 1 : 0);
     }
     return r;
 }

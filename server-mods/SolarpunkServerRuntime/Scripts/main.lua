@@ -292,15 +292,22 @@ for _, mod_name in ipairs(server_mods) do
     end
 end
 
-if SP_DIR then
+local function write_runtime_status(reason)
+    if not SP_DIR then return end
     write_kv_atomic(SP_DIR .. "\\.solarpunk-runtime-status", {
         "ready=" .. (#failed == 0 and "1" or "0"),
         "mods=" .. table.concat(loaded, ","),
         "failed=" .. table.concat(failed, ","),
         "updated=" .. tostring(os.time()),
-        "reason=" .. (#failed == 0 and "all_modules_loaded" or "partial_load"),
+        "reason=" .. tostring(reason or (#failed == 0 and "all_modules_loaded" or "partial_load")),
     })
 end
+
+write_runtime_status(#failed == 0 and "all_modules_loaded" or "partial_load")
+
+SP.every("runtime-heartbeat", 30000, 1000, function()
+    write_runtime_status(#failed == 0 and "all_modules_loaded" or "partial_load")
+end)
 
 log("server module load complete: loaded=" .. table.concat(loaded, ",") ..
     (#failed > 0 and (" failed=" .. table.concat(failed, ",")) or ""))

@@ -240,17 +240,23 @@ public sealed class SolarpunkHttpService : BackgroundService
             {
                 var heartbeatTimeout = TimeSpan.FromSeconds(Math.Max(1, _opts.PluginHeartbeatTimeoutSeconds));
                 var pluginOnline = _pipeState.HasFreshHeartbeat(heartbeatTimeout);
-                // Server is "online" if the plugin is pinging OR the Solarpunk process is
-                // alive (lobby-parked servers are joinable even before the plugin pings).
                 var gameProcessAlive = GameProcessProbe.IsAlive(_opts.GamePidFile);
-                var online = pluginOnline || gameProcessAlive;
+                var runtimeStatus = ReadStatusFile(".solarpunk-runtime-status");
+                var hostStatus = ReadStatusFile(".solarpunk-host-status");
+                var runtimeReady = IsStatusFlagSet(runtimeStatus, "ready");
+                var hostReady = IsStatusFlagSet(hostStatus, "hosting");
+                var statusTimeout = TimeSpan.FromSeconds(Math.Max(60, _opts.PluginHeartbeatTimeoutSeconds * 3));
+                var runtimeFresh = IsStatusFresh(runtimeStatus, statusTimeout);
+                var hostFresh = IsStatusFresh(hostStatus, statusTimeout);
+                var processOk = string.IsNullOrWhiteSpace(_opts.GamePidFile) || gameProcessAlive;
+                var online = pluginOnline && processOk && runtimeReady && runtimeFresh && hostReady && hostFresh;
                 int? heartbeatAgeSeconds = null;
                 if (_pipeState.LastHeartbeatAt is DateTimeOffset lastHeartbeat)
                     heartbeatAgeSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - lastHeartbeat).TotalSeconds);
 
                 _log.LogDebug(
-                    "/health decision: online={Online} (pluginOnline={Plugin}, gameProcessAlive={Process}, heartbeatAge={Age}s)",
-                    online, pluginOnline, gameProcessAlive, heartbeatAgeSeconds);
+                    "/health decision: online={Online} (pluginOnline={Plugin}, processOk={ProcessOk}, runtimeReady={RuntimeReady}, runtimeFresh={RuntimeFresh}, hostReady={HostReady}, hostFresh={HostFresh}, heartbeatAge={Age}s)",
+                    online, pluginOnline, processOk, runtimeReady, runtimeFresh, hostReady, hostFresh, heartbeatAgeSeconds);
 
                 await WriteJsonAsync(res, online ? 200 : 503, new
                 {
@@ -264,6 +270,14 @@ public sealed class SolarpunkHttpService : BackgroundService
                     max_players = _opts.MaxPlayers,
                     player_count = _pipeState.EffectivePlayerCount,
                     plugin_connected = _pipeState.Connection is not null,
+                    plugin_heartbeat_fresh = pluginOnline,
+                    game_process_alive = gameProcessAlive,
+                    runtime_ready = runtimeReady,
+                    runtime_status_fresh = runtimeFresh,
+                    host_ready = hostReady,
+                    host_status_fresh = hostFresh,
+                    runtime_reason = runtimeStatus.TryGetValue("reason", out var runtimeReason) ? runtimeReason : "missing",
+                    host_world = hostStatus.TryGetValue("world", out var hostWorld) ? hostWorld : "",
                     last_heartbeat_age_seconds = heartbeatAgeSeconds,
                 });
                 return;
@@ -946,6 +960,46 @@ public sealed class SolarpunkHttpService : BackgroundService
             return defaultValue;
         }
         return defaultValue;
+    }
+
+    private static Dictionary<string, string> ReadStatusFile(string fileName)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, fileName);
+            if (!File.Exists(path)) return result;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                result[line[..eq].Trim()] = line[(eq + 1)..].Trim();
+            }
+        }
+        catch
+        {
+            result.Clear();
+        }
+        return result;
+    }
+
+    private static bool IsStatusFlagSet(IReadOnlyDictionary<string, string> status, string key) =>
+        status.TryGetValue(key, out var value) && value == "1";
+
+    private static bool IsStatusFresh(IReadOnlyDictionary<string, string> status, TimeSpan maxAge)
+    {
+        if (!status.TryGetValue("updated", out var raw) || !long.TryParse(raw, out var unixSeconds))
+            return false;
+        try
+        {
+            var updated = DateTimeOffset.FromUnixTimeSeconds(unixSeconds);
+            var age = DateTimeOffset.UtcNow - updated;
+            return age >= TimeSpan.Zero && age <= maxAge;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static async Task<T?> ParseJsonBodyAsync<T>(BufferedBody body, CancellationToken ct) where T : class

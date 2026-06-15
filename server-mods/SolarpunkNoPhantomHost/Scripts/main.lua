@@ -115,15 +115,16 @@ local function clean_name(raw)
 end
 
 -- Generated machine-identity shapes observed on this game (OSS Null profile
--- name): "server-680B752F44B1A" (host) and "<MACHINE>-PC-<hex>" (per-session
--- client identity). Shape = <prefix>-<6+ hex chars>; the prefix is either the
--- literal "server" or an UPPERCASE machine-name shape. Deliberately narrow so
--- a legitimate character name is never classified as phantom.
+-- name): "server-680B752F44B1A" (host), "<MACHINE>-PC-<hex>", and
+-- "<launcher-name>-<hex>" during retail joins. Treat the long hex suffix as a
+-- transient platform identity so it never becomes the canonical character name.
 local function is_phantom_name(name)
     if type(name) ~= "string" then return false end
+    if name == "TESTING UID" or name == "ERROR, BAD UNIQUE NET ID" then return true end
     local prefix, suffix = name:match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
     if suffix == nil or #suffix < 6 then return false end
     if prefix == "server" then return true end
+    if #suffix >= 8 then return true end
     return prefix:match("^[A-Z0-9_%-]+$") ~= nil
 end
 
@@ -329,6 +330,7 @@ end
 local good_name = {}      -- [controller addr] = last known good RAW name
 local last_seen = {}      -- [controller addr] = last observed raw name (for transition logging)
 local machine_of = {}     -- [machine-shaped clean name] = controller addr that wore it
+SP.canonical_name = SP.canonical_name or {} -- [controller addr] = stable clean character name
 
 local function keep_name(pc, k)
     local ps = ps_of(pc)
@@ -338,11 +340,13 @@ local function keep_name(pc, k)
         log("name transition [" .. tostring(k) .. "]: '" .. tostring(last_seen[k]) .. "' -> '" .. raw .. "'")
         last_seen[k] = raw
     end
-    if raw ~= "" and not is_phantom_name(clean_name(raw)) then
+    local cleaned = clean_name(raw)
+    if raw ~= "" and not is_phantom_name(cleaned) then
         good_name[k] = raw
+        SP.canonical_name[k] = cleaned
         return
     end
-    if raw ~= "" then machine_of[clean_name(raw)] = k end
+    if raw ~= "" then machine_of[cleaned] = k end
     local want = good_name[k]
     if want and want ~= "" and raw ~= want then
         if set_field(ps, "PlayerNamePrivate", want) then

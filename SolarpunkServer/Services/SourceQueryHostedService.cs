@@ -108,21 +108,63 @@ public sealed class SourceQueryHostedService : IHostedService, IAsyncDisposable
         new KeyValuePair<string, string>("sp_build", SolarpunkVersionInfo.SpBuild),
     };
 
-    // Online when the in-game plugin is pinging OR the Solarpunk process is alive.
-    // The lobby-parked case (no fresh plugin heartbeat, but the game IS running and
-    // joinable) must still answer A2S so the launcher shows the server online.
+    // Online only when the in-game runtime is actively pinging and the Lua host
+    // stack is publishing fresh ready/hosting status. A plain Solarpunk process
+    // without the Sundial runtime is exactly the broken green state that can
+    // leave players unable to interact or persist saves.
     private bool IsGameOnline()
     {
         var freshHeartbeat = _state.HasFreshHeartbeat(_heartbeatTimeout);
-        // Only probe the pidfile if the heartbeat path didn't already say online,
-        // matching the original short-circuit (no behavior change).
-        var processAlive = !freshHeartbeat && GameProcessProbe.IsAlive(_opts.GamePidFile);
-        var online = freshHeartbeat || processAlive;
+        var processAlive = string.IsNullOrWhiteSpace(_opts.GamePidFile) || GameProcessProbe.IsAlive(_opts.GamePidFile);
+        var runtimeStatus = ReadStatusFile(".solarpunk-runtime-status");
+        var hostStatus = ReadStatusFile(".solarpunk-host-status");
+        var statusTimeout = TimeSpan.FromSeconds(Math.Max(60, _opts.PluginHeartbeatTimeoutSeconds * 3));
+        var runtimeReady = IsStatusFlagSet(runtimeStatus, "ready") && IsStatusFresh(runtimeStatus, statusTimeout);
+        var hostReady = IsStatusFlagSet(hostStatus, "hosting") && IsStatusFresh(hostStatus, statusTimeout);
+        var online = freshHeartbeat && processAlive && runtimeReady && hostReady;
         _log.LogDebug(
-            "A2S IsGameOnline={Online} (source={Source}, freshHeartbeat={Heartbeat}, gameProcessAlive={Process})",
-            online,
-            online ? (freshHeartbeat ? "fresh-heartbeat" : "game-process-probe") : "none",
-            freshHeartbeat, processAlive);
+            "A2S IsGameOnline={Online} (freshHeartbeat={Heartbeat}, gameProcessAlive={Process}, runtimeReady={RuntimeReady}, hostReady={HostReady})",
+            online, freshHeartbeat, processAlive, runtimeReady, hostReady);
         return online;
+    }
+
+    private static Dictionary<string, string> ReadStatusFile(string fileName)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, fileName);
+            if (!File.Exists(path)) return result;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                result[line[..eq].Trim()] = line[(eq + 1)..].Trim();
+            }
+        }
+        catch
+        {
+            result.Clear();
+        }
+        return result;
+    }
+
+    private static bool IsStatusFlagSet(IReadOnlyDictionary<string, string> status, string key) =>
+        status.TryGetValue(key, out var value) && value == "1";
+
+    private static bool IsStatusFresh(IReadOnlyDictionary<string, string> status, TimeSpan maxAge)
+    {
+        if (!status.TryGetValue("updated", out var raw) || !long.TryParse(raw, out var unixSeconds))
+            return false;
+        try
+        {
+            var updated = DateTimeOffset.FromUnixTimeSeconds(unixSeconds);
+            var age = DateTimeOffset.UtcNow - updated;
+            return age >= TimeSpan.Zero && age <= maxAge;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

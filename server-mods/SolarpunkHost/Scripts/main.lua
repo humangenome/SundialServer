@@ -290,6 +290,29 @@ local function pname(c)
     end)
     return clean_name(nm)
 end
+local function is_transient_identity_name(nm)
+    if nm == "TESTING UID" or nm == "ERROR, BAD UNIQUE NET ID" then return true end
+    local suffix = tostring(nm or ""):match("^[%w_%-]+%-([0-9A-Fa-f]+)$")
+    return suffix ~= nil and #suffix >= 8
+end
+local transient_log = {}
+local function stable_pname(c, k)
+    local raw = pname(c)
+    local nm = raw
+    if SP.canonical_name and SP.canonical_name[k] and SP.canonical_name[k] ~= "" then
+        nm = SP.canonical_name[k]
+    end
+    if nm == "" then return nil end
+    if is_transient_identity_name(nm) then
+        local key = tostring(k) .. ":" .. tostring(nm)
+        if not transient_log[key] then
+            transient_log[key] = true
+            log("save identity pending [" .. tostring(k) .. "] transient name=" .. tostring(nm))
+        end
+        return nil
+    end
+    return nm
+end
 local function akey(c)
     local k = 0
     pcall(function() k = c:GetAddress() end)
@@ -658,8 +681,8 @@ local function tick()
             live[k] = true
             -- never touch a controller auth already kicked (dying object)
             if not SP.kicked[k] then
-                local nm = pname(c)
-                if nm ~= "" then
+                local nm = stable_pname(c, k)
+                if nm then
                     local sid = synthId(nm)
                     stamp_persistence_ids(c, sid, "tick") -- save key (per-player)
                     -- The launcher/client name keeper can correct the PlayerState name
@@ -694,7 +717,10 @@ local function tick()
         end
     end
     for k in pairs(loaded_sid) do
-        if not live[k] then loaded_sid[k] = nil end
+        if not live[k] then
+            loaded_sid[k] = nil
+            if SP.canonical_name then SP.canonical_name[k] = nil end
+        end
     end
     for k in pairs(pending) do
         if not live[k] then pending[k] = nil end
@@ -757,8 +783,8 @@ local function save_sid_for_controller(c)
     -- The listen-server's local controller emits blank/BAD save IDs during
     -- normal hosting. Do not rewrite it to a remote player's identity.
     if c:IsLocalPlayerController() then return nil end
-    local nm = pname(c)
-    if nm == "" then return nil end
+    local nm = stable_pname(c, akey(c))
+    if not nm then return nil end
     return synthId(nm)
 end
 local function reissue_corrected_player_save(c, k, sid, playerdata, why)
