@@ -751,31 +751,12 @@ local function force_save_to_disk(reason)
     end
     save_flush_guard = false
 end
-local function single_remote_sid()
-    local cs = SP.controllers()
-    if not cs then return nil end
-    local sid, count = nil, 0
-    for _, c in ipairs(cs) do
-        if c and c:IsValid() and not c:IsLocalPlayerController() and not SP.kicked[akey(c)] then
-            local nm = pname(c)
-            if nm ~= "" then
-                sid = synthId(nm)
-                count = count + 1
-            end
-        end
-    end
-    if count == 1 then return sid end
-    return nil
-end
-local function host_save_sid()
-    return synthId("host:" .. WORLD_NAME)
-end
 local save_reentry = {}
 local function save_sid_for_controller(c)
     if not (c and c:IsValid()) then return nil end
-    if c:IsLocalPlayerController() then
-        return single_remote_sid() or host_save_sid()
-    end
+    -- The listen-server's local controller emits blank/BAD save IDs during
+    -- normal hosting. Do not rewrite it to a remote player's identity.
+    if c:IsLocalPlayerController() then return nil end
     local nm = pname(c)
     if nm == "" then return nil end
     return synthId(nm)
