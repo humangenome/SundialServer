@@ -296,6 +296,11 @@ local function akey(c)
     return k
 end
 local function isSynth(s) return s ~= nil and s:find("^765611900%d") ~= nil end
+local function is_blank_id(s)
+    s = tostring(s or "")
+    return s == "" or s == "TESTING UID" or s == "ERROR, BAD UNIQUE NET ID" or
+        s:match("^0+$") ~= nil
+end
 local function pawn_of(c)
     if not (c and c:IsValid()) then return nil end
     local pawn
@@ -305,8 +310,209 @@ local function pawn_of(c)
     if pawn and pawn:IsValid() then return pawn end
     return nil
 end
+local stamp_unique_player_id
+local function validish(obj)
+    if obj == nil then return false end
+    local ok, v = pcall(function() return obj:IsValid() end)
+    if ok then return v end
+    return type(obj) ~= "string" and type(obj) ~= "number" and type(obj) ~= "boolean"
+end
+local function object_key(obj)
+    local k
+    if pcall(function() k = obj:GetAddress() end) and k then return tostring(k) end
+    return tostring(obj)
+end
+local function add_candidate(out, obj, label)
+    if not validish(obj) then return end
+    local k = object_key(obj)
+    if out.seen[k] then return end
+    out.seen[k] = true
+    table.insert(out.items, { obj = obj, label = label })
+end
+local function candidate_prop(owner, pname)
+    if not validish(owner) then return nil end
+    local v
+    if pcall(function() v = owner[pname] end) then return v end
+    return nil
+end
+local function collect_named_props(owner, label, predicate, out)
+    if not validish(owner) then return end
+    local cls
+    if not pcall(function() cls = owner:GetClass() end) or not validish(cls) then return end
+    local guard = 0
+    while validish(cls) and guard < 24 do
+        guard = guard + 1
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                pcall(function()
+                    local pname = prop:GetFName():ToString()
+                    if predicate(pname:lower()) then
+                        add_candidate(out, candidate_prop(owner, pname), label .. "." .. pname)
+                    end
+                end)
+            end)
+        end)
+        local sup
+        if not pcall(function() sup = cls:GetSuperStruct() end) then break end
+        if not validish(sup) then break end
+        cls = sup
+    end
+end
+local field_stamp_log = {}
+local function set_string_fields(obj, fields, value, label, only_blank)
+    if not validish(obj) then return false end
+    local did = false
+    for _, field in ipairs(fields) do
+        local before = read_string_prop(obj, field)
+        if not only_blank or is_blank_id(before) then
+            local ok = pcall(function() obj[field] = value end)
+            if ok then
+                did = true
+                local key = label .. "." .. field .. "=" .. tostring(value)
+                if not field_stamp_log[key] then
+                    field_stamp_log[key] = true
+                    log(label .. "." .. field .. "=" .. tostring(read_string_prop(obj, field)))
+                end
+            end
+        end
+    end
+    return did
+end
+local function set_matching_string_props(obj, predicate, value, label, only_blank)
+    if not validish(obj) then return false end
+    local cls
+    if not pcall(function() cls = obj:GetClass() end) or not validish(cls) then return false end
+    local did = false
+    local guard = 0
+    while validish(cls) and guard < 24 do
+        guard = guard + 1
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                pcall(function()
+                    local pfull = tostring(prop:GetFullName())
+                    local kind = pfull:match("^(%a+)Property")
+                    if kind ~= "Str" and kind ~= "Name" then return end
+                    local pname = prop:GetFName():ToString()
+                    if not predicate(pname:lower()) then return end
+                    local before = read_string_prop(obj, pname)
+                    if only_blank and not is_blank_id(before) then return end
+                    local ok = pcall(function() obj[pname] = value end)
+                    if ok then
+                        did = true
+                        local key = label .. "." .. pname .. "=" .. tostring(value)
+                        if not field_stamp_log[key] then
+                            field_stamp_log[key] = true
+                            log(label .. "." .. pname .. "=" .. tostring(read_string_prop(obj, pname)))
+                        end
+                    end
+                end)
+            end)
+        end)
+        local sup
+        if not pcall(function() sup = cls:GetSuperStruct() end) then break end
+        if not validish(sup) then break end
+        cls = sup
+    end
+    return did
+end
+local function stable_inventory_id(sid)
+    return string.format("%08x%08x%08x%08x",
+        crc32("inv-a:" .. sid), crc32("inv-b:" .. sid),
+        crc32("inv-c:" .. sid), crc32("inv-d:" .. sid))
+end
+local playerdata_fields = {
+    "UniquePlayerID", "UniquePlayerId", "PlayerID", "PlayerId",
+    "PlayerIDString", "PlayerIdString", "PlayerdataID", "PlayerDataID",
+    "PlayerdataId", "PlayerDataId", "UniqueID", "UniqueId",
+    "SteamID", "SteamId", "UserID", "UserId", "OwnerID", "OwnerId",
+    "ID", "Id",
+}
+local inventory_id_fields = {
+    "InventoryID", "InventoryId", "InventoryUID", "InventoryUid",
+    "UniqueInventoryID", "UniqueInventoryId", "InventoryIDString",
+    "InventoryIdString", "InventoryUniqueID", "InventoryUniqueId",
+    "OwnerID", "OwnerId", "ID", "Id",
+}
+local playerdata_prop_names = {
+    "Playerdata", "PlayerData", "PlayerDataStruct", "PlayerdataStruct",
+    "CurrentPlayerdata", "CurrentPlayerData", "LoadedPlayerdata", "LoadedPlayerData",
+    "SavedPlayerdata", "SavedPlayerData", "PlayerSaveData", "SavePlayerData",
+}
+local inventory_prop_names = {
+    "InventorySystem", "Inventory", "InventoryComponent", "PlayerInventory",
+    "MainInventory", "BackpackInventory", "HotbarInventory",
+}
+local function stamp_playerdata_record(c, sid, why)
+    local out = { seen = {}, items = {} }
+    local owners = {
+        { obj = c, label = "pc" },
+        { obj = pawn_of(c), label = "pawn" },
+    }
+    pcall(function()
+        local ps = c.PlayerState
+        if ps and ps:IsValid() then table.insert(owners, { obj = ps, label = "ps" }) end
+    end)
+    for _, owner in ipairs(owners) do
+        for _, pname in ipairs(playerdata_prop_names) do
+            add_candidate(out, candidate_prop(owner.obj, pname), owner.label .. "." .. pname)
+        end
+        collect_named_props(owner.obj, owner.label, function(lower)
+            return lower:find("playerdata", 1, true) ~= nil or
+                lower:find("player_data", 1, true) ~= nil or
+                (lower:find("player", 1, true) ~= nil and lower:find("data", 1, true) ~= nil)
+        end, out)
+    end
+    local did = false
+    for _, item in ipairs(out.items) do
+        local label = "Playerdata ID stamped [" .. tostring(akey(c)) .. "] " ..
+            item.label .. " why=" .. tostring(why or "")
+        did = set_string_fields(item.obj, playerdata_fields, sid, label, false) or did
+        did = set_matching_string_props(item.obj, function(lower)
+            return lower:find("id", 1, true) ~= nil or
+                lower:find("uid", 1, true) ~= nil or
+                lower:find("steam", 1, true) ~= nil
+        end, sid, label, false) or did
+    end
+    return did
+end
+local function stamp_inventory_ids(c, sid, why)
+    local inv_id = stable_inventory_id(sid)
+    local out = { seen = {}, items = {} }
+    local owners = {
+        { obj = c, label = "pc" },
+        { obj = pawn_of(c), label = "pawn" },
+    }
+    pcall(function()
+        local ps = c.PlayerState
+        if ps and ps:IsValid() then table.insert(owners, { obj = ps, label = "ps" }) end
+    end)
+    for _, owner in ipairs(owners) do
+        for _, pname in ipairs(inventory_prop_names) do
+            add_candidate(out, candidate_prop(owner.obj, pname), owner.label .. "." .. pname)
+        end
+        collect_named_props(owner.obj, owner.label, function(lower)
+            return lower:find("inventory", 1, true) ~= nil
+        end, out)
+    end
+    local did = false
+    for _, item in ipairs(out.items) do
+        local label = "Inventory ID stamped [" .. tostring(akey(c)) .. "] " ..
+            item.label .. " why=" .. tostring(why or "")
+        did = set_string_fields(item.obj, inventory_id_fields, inv_id, label, true) or did
+        did = set_matching_string_props(item.obj, function(lower)
+            return lower:find("id", 1, true) ~= nil or lower:find("uid", 1, true) ~= nil
+        end, inv_id, label, true) or did
+    end
+    return did
+end
+local function stamp_persistence_ids(c, sid, why)
+    local a = stamp_unique_player_id(c, sid, why)
+    local b = stamp_playerdata_record(c, sid, why)
+    local d = stamp_inventory_ids(c, sid, why)
+    return a or b or d
+end
 local stamped_log = {}
-local function stamp_unique_player_id(c, sid, why)
+stamp_unique_player_id = function(c, sid, why)
     if not (c and c:IsValid()) or not isSynth(sid) then return false end
     local did = false
     local ok_pc = pcall(function() c.UniquePlayerID = sid end)
@@ -350,7 +556,7 @@ local function tick()
                 local nm = pname(c)
                 if nm ~= "" then
                     local sid = synthId(nm)
-                    stamp_unique_player_id(c, sid, "tick") -- save key (per-player)
+                    stamp_persistence_ids(c, sid, "tick") -- save key (per-player)
                     -- The launcher/client name keeper can correct the PlayerState name
                     -- after the game's first BeginLoadData call. When that happens,
                     -- re-load under the corrected character id so the load key and
@@ -429,6 +635,36 @@ local function try_install_bld_hook()
 end
 
 local save_player_hooked, save_player_tries = false, 0
+local save_flush_guard = false
+local function force_save_to_disk(reason)
+    if save_flush_guard then return end
+    save_flush_guard = true
+    local sm = FindFirstOf("BPC_SaveManager_C")
+    if sm and sm:IsValid() then
+        local ok = pcall(function() sm:SaveToDisk() end)
+        log("forced SaveToDisk reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok))
+    end
+    save_flush_guard = false
+end
+local function single_remote_sid()
+    local cs = SP.controllers()
+    if not cs then return nil end
+    local sid, count = nil, 0
+    for _, c in ipairs(cs) do
+        if c and c:IsValid() and not c:IsLocalPlayerController() and not SP.kicked[akey(c)] then
+            local nm = pname(c)
+            if nm ~= "" then
+                sid = synthId(nm)
+                count = count + 1
+            end
+        end
+    end
+    if count == 1 then return sid end
+    return nil
+end
+local function host_save_sid()
+    return synthId("host:" .. WORLD_NAME)
+end
 local function try_install_save_player_hook()
     if save_player_hooked then return end
     save_player_tries = save_player_tries + 1
@@ -437,14 +673,21 @@ local function try_install_save_player_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
-                if c:IsLocalPlayerController() then return end
                 local k = akey(c)
                 if SP.kicked[k] then return end
-                local nm = pname(c)
-                if nm == "" then return end
-                stamp_unique_player_id(c, synthId(nm), "pre-save")
+                local sid
+                if c:IsLocalPlayerController() then
+                    sid = single_remote_sid() or host_save_sid()
+                else
+                    local nm = pname(c)
+                    if nm == "" then return end
+                    sid = synthId(nm)
+                end
+                stamp_persistence_ids(c, sid, "pre-save")
             end)
-        end, function() end)
+        end, function()
+            pcall(function() force_save_to_disk("post-player-save") end)
+        end)
     end)
     if ok then
         save_player_hooked = true
