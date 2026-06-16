@@ -249,7 +249,7 @@ public sealed class SolarpunkHttpService : BackgroundService
                 var runtimeFresh = IsStatusFresh(runtimeStatus, statusTimeout);
                 var hostFresh = IsStatusFresh(hostStatus, statusTimeout);
                 var processOk = string.IsNullOrWhiteSpace(_opts.GamePidFile) || gameProcessAlive;
-                var online = pluginOnline && processOk && runtimeReady && runtimeFresh && hostReady && hostFresh;
+                var online = processOk && runtimeReady && runtimeFresh && hostReady && hostFresh;
                 int? heartbeatAgeSeconds = null;
                 if (_pipeState.LastHeartbeatAt is DateTimeOffset lastHeartbeat)
                     heartbeatAgeSeconds = Math.Max(0, (int)(DateTimeOffset.UtcNow - lastHeartbeat).TotalSeconds);

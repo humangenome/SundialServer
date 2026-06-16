@@ -108,10 +108,9 @@ public sealed class SourceQueryHostedService : IHostedService, IAsyncDisposable
         new KeyValuePair<string, string>("sp_build", SolarpunkVersionInfo.SpBuild),
     };
 
-    // Online only when the in-game runtime is actively pinging and the Lua host
-    // stack is publishing fresh ready/hosting status. A plain Solarpunk process
-    // without the Sundial runtime is exactly the broken green state that can
-    // leave players unable to interact or persist saves.
+    // Online only when the game process is alive and the Lua runtime/host stack
+    // is publishing fresh ready/hosting status. The native pipe heartbeat is
+    // diagnostic on Solarpunk servers; the identity DLL is client-side.
     private bool IsGameOnline()
     {
         var freshHeartbeat = _state.HasFreshHeartbeat(_heartbeatTimeout);
@@ -121,7 +120,7 @@ public sealed class SourceQueryHostedService : IHostedService, IAsyncDisposable
         var statusTimeout = TimeSpan.FromSeconds(Math.Max(60, _opts.PluginHeartbeatTimeoutSeconds * 3));
         var runtimeReady = IsStatusFlagSet(runtimeStatus, "ready") && IsStatusFresh(runtimeStatus, statusTimeout);
         var hostReady = IsStatusFlagSet(hostStatus, "hosting") && IsStatusFresh(hostStatus, statusTimeout);
-        var online = freshHeartbeat && processAlive && runtimeReady && hostReady;
+        var online = processAlive && runtimeReady && hostReady;
         _log.LogDebug(
             "A2S IsGameOnline={Online} (freshHeartbeat={Heartbeat}, gameProcessAlive={Process}, runtimeReady={RuntimeReady}, hostReady={HostReady})",
             online, freshHeartbeat, processAlive, runtimeReady, hostReady);
