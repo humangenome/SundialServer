@@ -118,6 +118,9 @@ end
 
 local SP_DIR = find_solarpunkserver_dir()
 local WORLD_NAME = "World1"
+local HOST_IDENTITY_SEED = "sp-host"
+local INSTANCE_DIR = SP_DIR and SP_DIR:match("^(.*)[\\/]SolarpunkServer$")
+local SAVE_GAMES_DIR = INSTANCE_DIR and (INSTANCE_DIR .. "\\UserDir\\Saved\\SaveGames") or nil
 local SAVE_INTERVAL_S = 300
 if SP_DIR then
     local body = read_all(SP_DIR .. "\\appsettings.json")
@@ -130,8 +133,15 @@ if SP_DIR then
     end
     local s = extract_json_number(body, "SaveIntervalSeconds")
     if s and s >= 30 then SAVE_INTERVAL_S = s end
+    local instance_id = extract_json_string(body, "InstanceId")
+    if instance_id and instance_id ~= "" then
+        instance_id = instance_id:gsub("[^%w%-%_]", ""):sub(1, 60)
+        if instance_id ~= "" then HOST_IDENTITY_SEED = "host-" .. instance_id end
+    end
     log("config: SolarpunkServer dir=" .. SP_DIR .. " WorldName=" .. WORLD_NAME ..
-        " SaveIntervalSeconds=" .. SAVE_INTERVAL_S)
+        " SaveIntervalSeconds=" .. SAVE_INTERVAL_S ..
+        " HostIdentitySeed=" .. HOST_IDENTITY_SEED ..
+        " SaveGamesDir=" .. tostring(SAVE_GAMES_DIR))
 else
     log("config: SolarpunkServer dir not found; defaults WorldName=" .. WORLD_NAME)
 end
@@ -240,6 +250,49 @@ local function rewrite_world_slot_param(p, label)
         " ok=" .. tostring(ok) .. " after=" .. tostring(param_string(p)))
 end
 
+local mirror_log = {}
+local function latest_active_world_save()
+    if not SAVE_GAMES_DIR then return nil end
+    local p = io.popen('dir /b /a-d /o-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
+    if not p then return nil end
+    local world_lower = (WORLD_NAME .. ".sav"):lower()
+    for name in p:lines() do
+        local lower = tostring(name or ""):lower()
+        if lower ~= world_lower and lower ~= "gp_data.sav" and lower ~= "options.sav" then
+            p:close()
+            return name
+        end
+    end
+    p:close()
+    return nil
+end
+
+local function mirror_active_world_save(reason)
+    if not SAVE_GAMES_DIR then return false end
+    local source_name = latest_active_world_save()
+    if not source_name then return false end
+    local src = SAVE_GAMES_DIR .. "\\" .. source_name
+    local dst = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
+    local data = read_all(src)
+    if not data or #data == 0 then return false end
+    local tmp = dst .. ".tmp"
+    local f = io.open(tmp, "wb")
+    if not f then return false end
+    f:write(data)
+    f:close()
+    os.remove(dst)
+    local ok = os.rename(tmp, dst)
+    if not ok then os.remove(tmp) end
+    local key = tostring(source_name) .. ":" .. tostring(#data) .. ":" .. tostring(ok)
+    if not mirror_log[key] then
+        mirror_log[key] = true
+        log("world save mirror " .. tostring(source_name) .. " -> " .. WORLD_NAME ..
+            ".sav reason=" .. tostring(reason or "") ..
+            " ok=" .. tostring(ok) .. " bytes=" .. tostring(#data))
+    end
+    return ok
+end
+
 -- Shared scheduler/state from SolarpunkServerRuntime (see the STABILITY
 -- CONTRACT comment there). All periodic work below runs as game-thread
 -- scheduler tasks — no mod-owned LoopAsync, no async-thread native access.
@@ -272,6 +325,8 @@ local function synthId(seed)
     if not seed or #seed == 0 then seed = "spx" end
     return string.format("765611900%09d", crc32(string.lower(seed)) % 1000000000)
 end
+local HOST_SYNTH_ID = synthId(HOST_IDENTITY_SEED)
+log("host local synthetic id=" .. HOST_SYNTH_ID .. " seed=" .. HOST_IDENTITY_SEED)
 -- Strip the SolarpunkAuth name-channel token (`<character>__SPPW__<password>`)
 -- so the save/load key is derived from the character name ONLY. Must stay
 -- byte-identical with SolarpunkAuth.AUTH_DELIM / SolarpunkRoster.clean_name.
@@ -676,39 +731,43 @@ local function tick()
     if not cs then return end
     local live = {}
     for _, c in ipairs(cs) do
-        if c and c:IsValid() and not c:IsLocalPlayerController() then
+        if c and c:IsValid() then
             local k = akey(c)
             live[k] = true
             -- never touch a controller auth already kicked (dying object)
             if not SP.kicked[k] then
-                local nm = stable_pname(c, k)
-                if nm then
-                    local sid = synthId(nm)
-                    stamp_persistence_ids(c, sid, "tick") -- save key (per-player)
-                    -- The launcher/client name keeper can correct the PlayerState name
-                    -- after the game's first BeginLoadData call. When that happens,
-                    -- re-load under the corrected character id so the load key and
-                    -- save key do not split for the session.
-                    if loaded_sid[k] ~= sid and pending[k] == nil then
-                        pending[k] = 6
-                        if loaded_sid[k] then
-                            log("save identity changed [" .. tostring(k) .. "]: " ..
-                                tostring(loaded_sid[k]) .. " -> " .. sid ..
-                                " (name=" .. nm .. "); re-arming BeginLoadData")
+                if c:IsLocalPlayerController() then
+                    stamp_persistence_ids(c, HOST_SYNTH_ID, "host-local-tick")
+                else
+                    local nm = stable_pname(c, k)
+                    if nm then
+                        local sid = synthId(nm)
+                        stamp_persistence_ids(c, sid, "tick") -- save key (per-player)
+                        -- The launcher/client name keeper can correct the PlayerState name
+                        -- after the game's first BeginLoadData call. When that happens,
+                        -- re-load under the corrected character id so the load key and
+                        -- save key do not split for the session.
+                        if loaded_sid[k] ~= sid and pending[k] == nil then
+                            pending[k] = 6
+                            if loaded_sid[k] then
+                                log("save identity changed [" .. tostring(k) .. "]: " ..
+                                    tostring(loaded_sid[k]) .. " -> " .. sid ..
+                                    " (name=" .. nm .. "); re-arming BeginLoadData")
+                            end
                         end
-                    end
-                    if pending[k] then
-                        pending[k] = pending[k] - 1
-                        if pending[k] <= 0 then
-                            pending[k] = nil
-                            local ok = pcall(function() c:BeginLoadData(sid) end) -- load key, lands last
-                            if ok then
-                                loaded_sid[k] = sid
-                                log("BeginLoadData re-issued [" .. tostring(k) .. "] sid=" .. sid ..
-                                    " name=" .. nm)
-                            else
-                                log("WARN: BeginLoadData re-issue failed [" .. tostring(k) ..
-                                    "] sid=" .. sid .. " name=" .. nm)
+                        if pending[k] then
+                            pending[k] = pending[k] - 1
+                            if pending[k] <= 0 then
+                                pending[k] = nil
+                                local ok = pcall(function() c:BeginLoadData(sid) end) -- load key, lands last
+                                if ok then
+                                    loaded_sid[k] = sid
+                                    log("BeginLoadData re-issued [" .. tostring(k) .. "] sid=" .. sid ..
+                                        " name=" .. nm)
+                                else
+                                    log("WARN: BeginLoadData re-issue failed [" .. tostring(k) ..
+                                        "] sid=" .. sid .. " name=" .. nm)
+                                end
                             end
                         end
                     end
@@ -774,15 +833,17 @@ local function force_save_to_disk(reason)
     if sm and sm:IsValid() then
         local ok = pcall(function() sm:SaveToDisk() end)
         log("forced SaveToDisk reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok))
+        if ok then mirror_active_world_save(reason) end
     end
     save_flush_guard = false
 end
 local save_reentry = {}
 local function save_sid_for_controller(c)
     if not (c and c:IsValid()) then return nil end
-    -- The listen-server's local controller emits blank/BAD save IDs during
-    -- normal hosting. Do not rewrite it to a remote player's identity.
-    if c:IsLocalPlayerController() then return nil end
+    -- The listen-server's local controller must not borrow a remote player's
+    -- identity, but leaving it blank/BAD lets the game write broken host-local
+    -- playerdata. Give it its own deterministic server identity.
+    if c:IsLocalPlayerController() then return HOST_SYNTH_ID end
     local nm = stable_pname(c, akey(c))
     if not nm then return nil end
     return synthId(nm)
@@ -920,6 +981,7 @@ SP.every("host-save", SAVE_INTERVAL_S * 1000, 2000, function()
     if sm and sm:IsValid() then
         local ok = pcall(function() sm:SaveToDisk() end)
         log("periodic SaveToDisk ok=" .. tostring(ok))
+        if ok then mirror_active_world_save("periodic") end
     end
 end)
 
