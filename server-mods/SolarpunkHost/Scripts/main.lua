@@ -448,6 +448,7 @@ local function import_text_property(obj, prop, field, value, label, only_blank)
     if not validish(obj) or not validish(prop) then return false end
     local before = read_string_prop(obj, field)
     if only_blank and not is_blank_id(before) then return false end
+    if tostring(before or "") == tostring(value) then return false end
     local ok = pcall(function()
         prop:ImportText(tostring(value), prop:ContainerPtrToValuePtr(obj), 0, obj)
     end)
@@ -515,7 +516,7 @@ local function set_struct_string_fields(s, fields, value, label, only_blank)
     local did = false
     for _, field in ipairs(fields) do
         local before = struct_field_string(s, field)
-        if not only_blank or is_blank_id(before) then
+        if (not only_blank or is_blank_id(before)) and tostring(before or "") ~= tostring(value) then
             local ok = pcall(function() s[field] = value end)
             local after = struct_field_string(s, field)
             if ok and after == tostring(value) then
@@ -560,7 +561,7 @@ local function set_struct_matching_string_props(s, predicate, value, label, only
             end
             if pname and (kind == "Str" or kind == "Name" or kind == "Text") and predicate(pname, kind) then
                 local before = struct_field_string(s, pname)
-                if not only_blank or is_blank_id(before) then
+                if (not only_blank or is_blank_id(before)) and tostring(before or "") ~= tostring(value) then
                     local ok = pcall(function() s[pname] = value end)
                     local after = struct_field_string(s, pname)
                     if ok and after == tostring(value) then
@@ -726,6 +727,39 @@ stamp_unique_player_id = function(c, sid, why)
     return did
 end
 
+local function load_sid_for_controller(c, k)
+    if c:IsLocalPlayerController() then return HOST_SYNTH_ID, "host-local" end
+    local nm = stable_pname(c, k)
+    if not nm then return nil, nil end
+    return synthId(nm), nm
+end
+
+local function drive_pending_begin_load(c, k, sid, name_label)
+    if loaded_sid[k] ~= sid and pending[k] == nil then
+        pending[k] = 6
+        if loaded_sid[k] then
+            log("save identity changed [" .. tostring(k) .. "]: " ..
+                tostring(loaded_sid[k]) .. " -> " .. sid ..
+                " (name=" .. tostring(name_label or "") .. "); re-arming BeginLoadData")
+        end
+    end
+    if pending[k] then
+        pending[k] = pending[k] - 1
+        if pending[k] <= 0 then
+            pending[k] = nil
+            local ok = pcall(function() c:BeginLoadData(sid) end) -- load key, lands last
+            if ok then
+                loaded_sid[k] = sid
+                log("BeginLoadData re-issued [" .. tostring(k) .. "] sid=" .. sid ..
+                    " name=" .. tostring(name_label or ""))
+            else
+                log("WARN: BeginLoadData re-issue failed [" .. tostring(k) ..
+                    "] sid=" .. sid .. " name=" .. tostring(name_label or ""))
+            end
+        end
+    end
+end
+
 local function tick()
     local cs = SP.controllers()
     if not cs then return end
@@ -736,41 +770,16 @@ local function tick()
             live[k] = true
             -- never touch a controller auth already kicked (dying object)
             if not SP.kicked[k] then
-                if c:IsLocalPlayerController() then
-                    stamp_persistence_ids(c, HOST_SYNTH_ID, "host-local-tick")
-                else
-                    local nm = stable_pname(c, k)
-                    if nm then
-                        local sid = synthId(nm)
-                        stamp_persistence_ids(c, sid, "tick") -- save key (per-player)
-                        -- The launcher/client name keeper can correct the PlayerState name
-                        -- after the game's first BeginLoadData call. When that happens,
-                        -- re-load under the corrected character id so the load key and
-                        -- save key do not split for the session.
-                        if loaded_sid[k] ~= sid and pending[k] == nil then
-                            pending[k] = 6
-                            if loaded_sid[k] then
-                                log("save identity changed [" .. tostring(k) .. "]: " ..
-                                    tostring(loaded_sid[k]) .. " -> " .. sid ..
-                                    " (name=" .. nm .. "); re-arming BeginLoadData")
-                            end
-                        end
-                        if pending[k] then
-                            pending[k] = pending[k] - 1
-                            if pending[k] <= 0 then
-                                pending[k] = nil
-                                local ok = pcall(function() c:BeginLoadData(sid) end) -- load key, lands last
-                                if ok then
-                                    loaded_sid[k] = sid
-                                    log("BeginLoadData re-issued [" .. tostring(k) .. "] sid=" .. sid ..
-                                        " name=" .. nm)
-                                else
-                                    log("WARN: BeginLoadData re-issue failed [" .. tostring(k) ..
-                                        "] sid=" .. sid .. " name=" .. nm)
-                                end
-                            end
-                        end
-                    end
+                local sid, name_label = load_sid_for_controller(c, k)
+                if sid then
+                    stamp_persistence_ids(c, sid, c:IsLocalPlayerController() and "host-local-tick" or "tick")
+                    -- The launcher/client name keeper can correct the PlayerState name
+                    -- after the game's first BeginLoadData call. When that happens,
+                    -- re-load under the corrected character id so the load key and
+                    -- save key do not split for the session. The listen-server's local
+                    -- controller also needs this deterministic load key; a blank local
+                    -- load can initialize world/player systems against broken host data.
+                    drive_pending_begin_load(c, k, sid, name_label)
                 end
             end
         end
@@ -806,12 +815,12 @@ local function try_install_bld_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
-                if c:IsLocalPlayerController() then return end
                 local k = akey(c)
                 SP.transition[k] = os.time()       -- join/load transition in flight
                 local key = ""
                 pcall(function() key = p1:get():ToString() end)
-                if not isSynth(key) then pending[k] = 6 end -- ~6*250ms after last natural load
+                local sid = select(1, load_sid_for_controller(c, k))
+                if sid and key ~= sid then pending[k] = 6 end -- ~6*250ms after last natural load
             end)
         end, function() end)
     end)
@@ -934,6 +943,8 @@ SP.every("host-boot", 1000, 0, function()
     set_world_slot_fields(gi, "GameInstance")
     log_saveish_string_props(gi, "GameInstance.after")
     try_install_save_slot_hooks()
+    try_install_bld_hook()
+    try_install_save_player_hook()
 
     -- transport: force IpNetDriver so the headless host binds real UDP
     local eng = FindFirstOf("GameEngine")
