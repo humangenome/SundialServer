@@ -965,7 +965,7 @@ local function force_save_to_disk(reason)
     if sm and sm:IsValid() then
         local ok = pcall(function() sm:SaveToDisk() end)
         log("forced SaveToDisk reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok))
-        if ok then mirror_active_world_save(reason) end
+        if ok then normalize_save_games_dir(reason) end
     end
     save_flush_guard = false
 end
@@ -1116,7 +1116,7 @@ SP.every("host-save", SAVE_INTERVAL_S * 1000, 2000, function()
     if sm and sm:IsValid() then
         local ok = pcall(function() sm:SaveToDisk() end)
         log("periodic SaveToDisk ok=" .. tostring(ok))
-        if ok then mirror_active_world_save("periodic") end
+        if ok then normalize_save_games_dir("periodic") end
     end
 end)
 
