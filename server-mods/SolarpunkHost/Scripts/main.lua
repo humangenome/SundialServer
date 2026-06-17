@@ -244,16 +244,49 @@ local function param_string(p)
     return nil
 end
 
+local ensure_world_slot_alias
 local function rewrite_world_slot_param(p, label)
     local before = param_string(p)
     if not before or before == "" or before == WORLD_NAME then return end
     if before == "Options" or before == "gp_data" then return end
+    ensure_world_slot_alias(before, label)
     local ok = pcall(function() p:set(WORLD_NAME) end)
     log("slot rewrite " .. label .. ": " .. tostring(before) .. " -> " .. WORLD_NAME ..
         " ok=" .. tostring(ok) .. " after=" .. tostring(param_string(p)))
 end
 
 local mirror_log = {}
+local alias_log = {}
+ensure_world_slot_alias = function(slot, reason)
+    if not SAVE_GAMES_DIR then return false end
+    slot = tostring(slot or "")
+    if slot == "" or slot == WORLD_NAME or slot == "Options" or slot == "gp_data" then return false end
+    if slot:find("\\", 1, true) or slot:find("/", 1, true) or slot:find(":", 1, true) then return false end
+    local source = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
+    if not file_exists(source) then return false end
+    local slot_file = slot
+    if slot_file:lower():sub(-4) ~= ".sav" then slot_file = slot_file .. ".sav" end
+    local dst = SAVE_GAMES_DIR .. "\\" .. slot_file
+    local data = read_all(source)
+    if not data or #data == 0 then return false end
+    local tmp = dst .. ".tmp"
+    local f = io.open(tmp, "wb")
+    if not f then return false end
+    f:write(data)
+    f:close()
+    os.remove(dst)
+    local ok = os.rename(tmp, dst)
+    if not ok then os.remove(tmp) end
+    local key = slot_file .. ":" .. tostring(ok) .. ":" .. tostring(#data)
+    if not alias_log[key] then
+        alias_log[key] = true
+        log("world slot alias " .. WORLD_NAME .. ".sav -> " .. slot_file ..
+            " reason=" .. tostring(reason or "") ..
+            " ok=" .. tostring(ok) .. " bytes=" .. tostring(#data))
+    end
+    return ok
+end
+
 local function latest_relevant_save_name()
     if not SAVE_GAMES_DIR then return nil end
     local p = io.popen('dir /b /a-d /o-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
@@ -874,6 +907,7 @@ end
 -- their hands off the controller until the join transition settles.
 local BLD_CLASS = "/Game/Code/Character/BP_MainPlayerController.BP_MainPlayerController_C"
 local ld_hooked, ld_tries = false, 0
+local immediate_bld_reentry = {}
 local function try_install_bld_hook()
     if ld_hooked then return end
     ld_tries = ld_tries + 1
@@ -889,7 +923,29 @@ local function try_install_bld_hook()
                 local sid = select(1, load_sid_for_controller(c, k))
                 if sid and key ~= sid then pending[k] = begin_load_delay(c) end
             end)
-        end, function() end)
+        end, function(self)
+            pcall(function()
+                local c = self:get()
+                if not c or not c:IsValid() then return end
+                local k = akey(c)
+                if immediate_bld_reentry[k] then return end
+                local sid, name_label = load_sid_for_controller(c, k)
+                if not sid or loaded_sid[k] == sid then return end
+                immediate_bld_reentry[k] = true
+                stamp_persistence_ids(c, sid, c:IsLocalPlayerController() and "post-begin-load-local" or "post-begin-load")
+                local ok = pcall(function() c:BeginLoadData(sid) end)
+                immediate_bld_reentry[k] = nil
+                if ok then
+                    loaded_sid[k] = sid
+                    pending[k] = nil
+                    log("BeginLoadData immediate post re-issued [" .. tostring(k) ..
+                        "] sid=" .. sid .. " name=" .. tostring(name_label or ""))
+                else
+                    log("WARN: BeginLoadData immediate post re-issue failed [" ..
+                        tostring(k) .. "] sid=" .. sid .. " name=" .. tostring(name_label or ""))
+                end
+            end)
+        end)
     end)
     if ok then
         ld_hooked = true
