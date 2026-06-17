@@ -123,6 +123,9 @@ local INSTANCE_DIR = SP_DIR and SP_DIR:match("^(.*)[\\/]SolarpunkServer$")
 local SAVE_GAMES_DIR = INSTANCE_DIR and (INSTANCE_DIR .. "\\UserDir\\Saved\\SaveGames") or nil
 local SAVE_INTERVAL_S = 300
 if SP_DIR then
+    LOG_DIR = SP_DIR .. "\\logs"
+    os.execute('mkdir "' .. LOG_DIR .. '" >NUL 2>NUL')
+    LOG_FILE = LOG_DIR .. "\\SolarpunkHost.log"
     local body = read_all(SP_DIR .. "\\appsettings.json")
     local w = extract_json_string(body, "WorldName")
     -- Sanitize: the name becomes a file name (<name>.sav). Allow word chars,
@@ -251,8 +254,25 @@ local function rewrite_world_slot_param(p, label)
 end
 
 local mirror_log = {}
+local function latest_relevant_save_name()
+    if not SAVE_GAMES_DIR then return nil end
+    local p = io.popen('dir /b /a-d /o-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
+    if not p then return nil end
+    for name in p:lines() do
+        local lower = tostring(name or ""):lower()
+        if lower ~= "gp_data.sav" and lower ~= "options.sav" then
+            p:close()
+            return name
+        end
+    end
+    p:close()
+    return nil
+end
+
 local function latest_active_world_save()
     if not SAVE_GAMES_DIR then return nil end
+    local latest = latest_relevant_save_name()
+    if latest and latest:lower() == (WORLD_NAME .. ".sav"):lower() then return nil end
     local p = io.popen('dir /b /a-d /o-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
     if not p then return nil end
     local world_lower = (WORLD_NAME .. ".sav"):lower()
@@ -291,6 +311,48 @@ local function mirror_active_world_save(reason)
             " ok=" .. tostring(ok) .. " bytes=" .. tostring(#data))
     end
     return ok
+end
+
+local function archive_orphaned_world_saves(reason)
+    if not SAVE_GAMES_DIR then return 0 end
+    local p = io.popen('dir /b /a-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
+    if not p then return 0 end
+    local archive_dir = SAVE_GAMES_DIR .. "\\_sundial_orphaned_saves"
+    os.execute('mkdir "' .. archive_dir .. '" >NUL 2>NUL')
+    local world_lower = (WORLD_NAME .. ".sav"):lower()
+    local count = 0
+    local stamp = os.date("%Y%m%d%H%M%S")
+    for name in p:lines() do
+        local lower = tostring(name or ""):lower()
+        if lower ~= world_lower and lower ~= "gp_data.sav" and lower ~= "options.sav" then
+            local src = SAVE_GAMES_DIR .. "\\" .. name
+            local dst = archive_dir .. "\\" .. stamp .. "-" .. name
+            local suffix = 0
+            while file_exists(dst) and suffix < 100 do
+                suffix = suffix + 1
+                dst = archive_dir .. "\\" .. stamp .. "-" .. tostring(suffix) .. "-" .. name
+            end
+            local ok = os.rename(src, dst)
+            log("orphan world save archive " .. tostring(name) ..
+                " reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok) ..
+                " dst=" .. tostring(dst))
+            if ok then count = count + 1 end
+        end
+    end
+    p:close()
+    if count > 0 then
+        log("orphan world save archive complete count=" .. tostring(count) ..
+            " reason=" .. tostring(reason or ""))
+    end
+    return count
+end
+
+local function normalize_save_games_dir(reason)
+    local mirrored = mirror_active_world_save(reason)
+    local archived = archive_orphaned_world_saves(reason)
+    log("save dir normalized reason=" .. tostring(reason or "") ..
+        " mirrored=" .. tostring(mirrored) ..
+        " archived=" .. tostring(archived))
 end
 
 -- Shared scheduler/state from SolarpunkServerRuntime (see the STABILITY
@@ -734,9 +796,14 @@ local function load_sid_for_controller(c, k)
     return synthId(nm), nm
 end
 
+local function begin_load_delay(c)
+    if c and c:IsValid() and c:IsLocalPlayerController() then return 1 end
+    return 6
+end
+
 local function drive_pending_begin_load(c, k, sid, name_label)
     if loaded_sid[k] ~= sid and pending[k] == nil then
-        pending[k] = 6
+        pending[k] = begin_load_delay(c)
         if loaded_sid[k] then
             log("save identity changed [" .. tostring(k) .. "]: " ..
                 tostring(loaded_sid[k]) .. " -> " .. sid ..
@@ -820,7 +887,7 @@ local function try_install_bld_hook()
                 local key = ""
                 pcall(function() key = p1:get():ToString() end)
                 local sid = select(1, load_sid_for_controller(c, k))
-                if sid and key ~= sid then pending[k] = 6 end -- ~6*250ms after last natural load
+                if sid and key ~= sid then pending[k] = begin_load_delay(c) end
             end)
         end, function() end)
     end)
@@ -945,6 +1012,7 @@ SP.every("host-boot", 1000, 0, function()
     try_install_save_slot_hooks()
     try_install_bld_hook()
     try_install_save_player_hook()
+    normalize_save_games_dir("pre-host")
 
     -- transport: force IpNetDriver so the headless host binds real UDP
     local eng = FindFirstOf("GameEngine")
