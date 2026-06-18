@@ -345,6 +345,7 @@ local function make_ftext(s)
     return nil
 end
 local KICK_REASON = make_ftext("Server password incorrect.")
+local IDENTITY_KICK_REASON = make_ftext("Please close and reopen Sundial, then reconnect.")
 
 -- Find the active GameSession (for KickPlayer). Cached after first resolve.
 local g_game_session = nil
@@ -362,15 +363,16 @@ end
 -- a half-torn-down PlayerController/NetConnection re-enters UE4SS dispatch on a
 -- dying object and crashes. The single engine-sanctioned KickPlayer drops the
 -- connection cleanly; ClientReturnToMainMenuWithTextReason is the fallback.
-local function kick_once(pc)
+local function kick_once(pc, reason)
     if not pc or not pc:IsValid() then return false end
+    local kick_reason = reason or KICK_REASON
     local ok_any = false
     local gs = game_session()
-    if gs and KICK_REASON ~= nil then
-        if pcall(function() gs:KickPlayer(pc, KICK_REASON) end) then ok_any = true end
+    if gs and kick_reason ~= nil then
+        if pcall(function() gs:KickPlayer(pc, kick_reason) end) then ok_any = true end
     end
-    if KICK_REASON ~= nil then
-        pcall(function() pc:ClientReturnToMainMenuWithTextReason(KICK_REASON) end)
+    if kick_reason ~= nil then
+        pcall(function() pc:ClientReturnToMainMenuWithTextReason(kick_reason) end)
     end
     return ok_any
 end
@@ -419,7 +421,14 @@ local function evaluate(pc)
     -- Password gate: an empty CONFIGURED_PASSWORD means the server is open, so
     -- only the ban gate above applies; otherwise require the matching token.
     if CONFIGURED_PASSWORD == "" and is_transient_identity_name(character) then
-        if not first_seen[k] then first_seen[k] = os.time() end
+        if not first_seen[k] then first_seen[k] = os.time(); return end
+        if os.time() - first_seen[k] < GRACE_SECONDS then return end
+        if not can_kick then return end
+        kicked[k] = true
+        first_seen[k] = nil
+        log("auth DENY (transient identity) name='" .. tostring(raw) ..
+            "' [" .. tostring(k) .. "] -- kicking (relaunch required)")
+        kick_once(pc, IDENTITY_KICK_REASON)
         return
     end
     if CONFIGURED_PASSWORD == "" or (raw ~= "" and token == CONFIGURED_PASSWORD) then
