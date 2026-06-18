@@ -880,7 +880,7 @@ stamp_unique_player_id = function(c, sid, why)
 end
 
 local function load_sid_for_controller(c, k)
-    if c:IsLocalPlayerController() then return HOST_SYNTH_ID, "host-local" end
+    if c:IsLocalPlayerController() then return nil, nil end
     local nm = stable_pname(c, k)
     if not nm then
         local sid = trusted_existing_sid(c, k)
@@ -891,7 +891,6 @@ local function load_sid_for_controller(c, k)
 end
 
 local function begin_load_delay(c)
-    if c and c:IsValid() and c:IsLocalPlayerController() then return 1 end
     return 6
 end
 
@@ -930,16 +929,14 @@ local function tick()
             local k = akey(c)
             live[k] = true
             -- never touch a controller auth already kicked (dying object)
-            if not SP.kicked[k] then
+            if not c:IsLocalPlayerController() and not SP.kicked[k] then
                 local sid, name_label = load_sid_for_controller(c, k)
                 if sid then
-                    stamp_persistence_ids(c, sid, c:IsLocalPlayerController() and "host-local-tick" or "tick")
+                    stamp_persistence_ids(c, sid, "tick")
                     -- The launcher/client name keeper can correct the PlayerState name
                     -- after the game's first BeginLoadData call. When that happens,
                     -- re-load under the corrected character id so the load key and
-                    -- save key do not split for the session. The listen-server's local
-                    -- controller also needs this deterministic load key; a blank local
-                    -- load can initialize world/player systems against broken host data.
+                    -- save key do not split for the session.
                     drive_pending_begin_load(c, k, sid, name_label)
                 end
             end
@@ -977,6 +974,7 @@ local function try_install_bld_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
                 local k = akey(c)
                 SP.transition[k] = os.time()       -- join/load transition in flight
                 local key = ""
@@ -988,6 +986,7 @@ local function try_install_bld_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
                 local k = akey(c)
                 if immediate_bld_reentry[k] then return end
                 local sid, name_label = load_sid_for_controller(c, k)
@@ -1019,6 +1018,7 @@ end
 
 local save_player_hooked, save_player_tries = false, 0
 local save_flush_guard = false
+local save_skip_post_once = false
 local function force_save_to_disk(reason)
     if save_flush_guard then return end
     save_flush_guard = true
@@ -1034,10 +1034,9 @@ end
 local save_reentry = {}
 local function save_sid_for_controller(c)
     if not (c and c:IsValid()) then return nil end
-    -- The listen-server's local controller must not borrow a remote player's
-    -- identity, but leaving it blank/BAD lets the game write broken host-local
-    -- playerdata. Give it its own deterministic server identity.
-    if c:IsLocalPlayerController() then return HOST_SYNTH_ID end
+    -- The listen-server's local controller is not a real customer player. If we
+    -- stamp or re-save it, the game can persist customer state under host-local.
+    if c:IsLocalPlayerController() then return nil end
     local nm = stable_pname(c, akey(c))
     if not nm then return trusted_existing_sid(c, akey(c)) end
     return synthId(nm)
@@ -1061,6 +1060,10 @@ local function try_install_save_player_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then
+                    save_skip_post_once = true
+                    return
+                end
                 local k = akey(c)
                 if SP.kicked[k] then return end
                 local sid = save_sid_for_controller(c)
@@ -1069,8 +1072,16 @@ local function try_install_save_player_hook()
                 local did = stamp_playerdata_param(playerdata, sid, "pre-save")
                 if did then reissue_corrected_player_save(c, k, sid, playerdata, "pre-save") end
             end)
-        end, function()
-            pcall(function() force_save_to_disk("post-player-save") end)
+        end, function(self)
+            pcall(function()
+                if save_skip_post_once then
+                    save_skip_post_once = false
+                    return
+                end
+                local c = self and self:get()
+                if c and c:IsValid() and c:IsLocalPlayerController() then return end
+                force_save_to_disk("post-player-save")
+            end)
         end)
     end)
     if ok then
