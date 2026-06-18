@@ -1155,6 +1155,7 @@ end
 
 local save_player_hooked, save_player_tries = false, 0
 local save_flush_guard = false
+local save_skip_post_once = false
 local pending_corrected_save = {}
 local function force_save_to_disk(reason)
     if save_flush_guard then return end
@@ -1197,25 +1198,6 @@ local function reissue_corrected_player_save(c, k, sid, why, patch, s)
         " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
     return ok2
 end
-local function flush_pending_corrected_saves(reason)
-    local cs = SP.controllers()
-    if not cs then return end
-    for _, c in ipairs(cs) do
-        if c and c:IsValid() then
-            local k = akey(c)
-            if not save_reentry[k] then
-                local pending_save = pending_corrected_save[k]
-                if pending_save then
-                    pending_corrected_save[k] = nil
-                    local ok2 = reissue_corrected_player_save(c, k, pending_save.sid,
-                        pending_save.why .. "-" .. tostring(reason or "scheduled"),
-                        pending_save.patch, pending_save.struct)
-                    if ok2 then force_save_to_disk(pending_save.why .. "-" .. tostring(reason or "scheduled")) end
-                end
-            end
-        end
-    end
-end
 local function try_install_save_player_hook()
     if save_player_hooked then return end
     save_player_tries = save_player_tries + 1
@@ -1227,11 +1209,7 @@ local function try_install_save_player_hook()
                 local k = akey(c)
                 if save_reentry[k] then return end
                 if c:IsLocalPlayerController() then
-                    stamp_persistence_ids(c, HOST_SYNTH_ID, "pre-save-local")
-                    local did, patch, s = stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-local")
-                    if did then
-                        pending_corrected_save[k] = { sid = HOST_SYNTH_ID, patch = patch, struct = s, why = "post-save-local" }
-                    end
+                    save_skip_post_once = true
                     return
                 end
                 if SP.kicked[k] then return end
@@ -1245,6 +1223,10 @@ local function try_install_save_player_hook()
             end)
         end, function(self)
             pcall(function()
+                if save_skip_post_once then
+                    save_skip_post_once = false
+                    return
+                end
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
                 local k = akey(c)
@@ -1359,11 +1341,6 @@ end)
 SP.every("host-netid", 250, 0, function()
     if not hosted then return end
     tick()
-end)
-
-SP.every("host-player-save-correct", 1000, 750, function()
-    if not hosted then return end
-    flush_pending_corrected_saves("scheduler")
 end)
 
 -- forced world save cadence (the game autosaves too; this is the floor)
