@@ -349,6 +349,7 @@ local function rewrite_world_slot_param(p, label)
     local before = param_string(p)
     if not before or before == "" or before == WORLD_NAME then return end
     if before == "Options" or before == "gp_data" then return end
+    enforce_world_slot_runtime("slot-rewrite-" .. tostring(label or ""))
     local ok = pcall(function() p:set(WORLD_NAME) end)
     log("slot rewrite " .. label .. ": " .. tostring(before) .. " -> " .. WORLD_NAME ..
         " ok=" .. tostring(ok) .. " after=" .. tostring(param_string(p)))
@@ -867,12 +868,29 @@ local function stamp_playerdata_param(param, sid, why)
     if not isSynth(sid) or param == nil then return false end
     local s
     if not pcall(function() s = param:get() end) or not validish(s) then return false end
+    local patch = {}
+    for _, field in ipairs(playerdata_fields) do patch[field] = sid end
     local did = set_struct_string_fields(s, playerdata_fields, sid,
         "Playerdata param stamped why=" .. tostring(why or ""), false)
     did = set_struct_matching_string_props(s, is_player_id_field, sid,
         "Playerdata param stamped why=" .. tostring(why or ""), false) or did
+    pcall(function()
+        s:ForEachProperty(function(prop)
+            local pname = prop_name(prop)
+            local kind = prop_kind(prop)
+            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname, kind) then
+                patch[pname] = sid
+            end
+        end)
+    end)
+    local ok_table = pcall(function() param:set(patch) end)
     if did then pcall(function() param:set(s) end) end
-    return did
+    local key = "Playerdata param table-set why=" .. tostring(why or "") .. " sid=" .. sid
+    if not field_stamp_log[key] then
+        field_stamp_log[key] = true
+        log(key .. " ok=" .. tostring(ok_table))
+    end
+    return did or ok_table
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
