@@ -182,6 +182,18 @@ local WORLD_SLOT_FIELDS = {
     "LoadedSaveName",
 }
 
+local function is_world_slot_field_name(name)
+    local lower = tostring(name or ""):lower()
+    if lower:find("player", 1, true) or lower:find("server", 1, true) or
+        lower:find("display", 1, true) or lower:find("profile", 1, true) then
+        return false
+    end
+    return lower == "worldname" or lower == "worldsavename" or lower:match("^worldname_") or
+        lower:match("^worldsavename_") or lower:find("worldsave", 1, true) or
+        lower:find("savegame", 1, true) or lower:find("saveslot", 1, true) or
+        lower:find("slotname", 1, true) or lower:find("slot_name", 1, true)
+end
+
 local function read_string_prop(obj, pname)
     local v
     if not pcall(function() v = obj[pname] end) then return nil end
@@ -192,6 +204,47 @@ local function read_string_prop(obj, pname)
     return nil
 end
 
+local dynamic_world_slot_log = {}
+local function set_dynamic_world_slot_fields(obj, label)
+    if not (obj and obj:IsValid()) then return false end
+    local cls
+    if not pcall(function() cls = obj:GetClass() end) or not (cls and cls:IsValid()) then return false end
+    local did = false
+    local guard = 0
+    while cls and cls:IsValid() and guard < 24 do
+        guard = guard + 1
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                pcall(function()
+                    local pfull = tostring(prop:GetFullName())
+                    local kind = pfull:match("^(%a+)Property")
+                    if kind ~= "Str" and kind ~= "Name" and kind ~= "Text" then return end
+                    local pname = prop:GetFName():ToString()
+                    if not is_world_slot_field_name(pname) then return end
+                    local before = read_string_prop(obj, pname)
+                    if before == WORLD_NAME then return end
+                    local ok = pcall(function() obj[pname] = WORLD_NAME end)
+                    local after = read_string_prop(obj, pname)
+                    if ok and after == WORLD_NAME then
+                        did = true
+                        local key = tostring(label) .. "." .. tostring(pname)
+                        if not dynamic_world_slot_log[key] then
+                            dynamic_world_slot_log[key] = true
+                            log(label .. "." .. pname .. "=" .. tostring(after) ..
+                                " dynamic-world-slot before=" .. tostring(before))
+                        end
+                    end
+                end)
+            end)
+        end)
+        local sup
+        if not pcall(function() sup = cls:GetSuperStruct() end) then break end
+        if not (sup and sup:IsValid()) then break end
+        cls = sup
+    end
+    return did
+end
+
 local function set_world_slot_fields(obj, label)
     if not (obj and obj:IsValid()) then return end
     for _, pname in ipairs(WORLD_SLOT_FIELDS) do
@@ -200,6 +253,7 @@ local function set_world_slot_fields(obj, label)
             log(label .. "." .. pname .. "=" .. tostring(read_string_prop(obj, pname)))
         end
     end
+    set_dynamic_world_slot_fields(obj, label)
 end
 
 local world_slot_enforce_log = {}
@@ -222,6 +276,7 @@ local function enforce_world_slot_fields(obj, label)
             end
         end
     end
+    did = set_dynamic_world_slot_fields(obj, label) or did
     return did
 end
 
@@ -1123,6 +1178,8 @@ local function try_install_save_player_hook()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then
+                    stamp_persistence_ids(c, HOST_SYNTH_ID, "pre-save-local")
+                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-local")
                     save_skip_post_once = true
                     return
                 end
