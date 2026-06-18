@@ -261,6 +261,15 @@ local function split_name(raw)
     return raw:sub(1, i - 1), raw:sub(i + #AUTH_DELIM)
 end
 
+local function is_transient_identity_name(name)
+    if type(name) ~= "string" then return false end
+    if name == "TESTING UID" or name == "ERROR, BAD UNIQUE NET ID" then return true end
+    if name:match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
+    if name:match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
+    local _, suffix = name:match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    return suffix ~= nil and #suffix >= 8
+end
+
 local function player_name(pc)
     local nm = ""
     pcall(function()
@@ -409,6 +418,10 @@ local function evaluate(pc)
     end
     -- Password gate: an empty CONFIGURED_PASSWORD means the server is open, so
     -- only the ban gate above applies; otherwise require the matching token.
+    if CONFIGURED_PASSWORD == "" and is_transient_identity_name(character) then
+        if not first_seen[k] then first_seen[k] = os.time() end
+        return
+    end
     if CONFIGURED_PASSWORD == "" or (raw ~= "" and token == CONFIGURED_PASSWORD) then
         verified[k] = true
         first_seen[k] = nil

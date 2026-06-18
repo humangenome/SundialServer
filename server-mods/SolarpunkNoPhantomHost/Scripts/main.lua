@@ -121,6 +121,8 @@ end
 local function is_phantom_name(name)
     if type(name) ~= "string" then return false end
     if name == "TESTING UID" or name == "ERROR, BAD UNIQUE NET ID" then return true end
+    if name:match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
+    if name:match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
     local prefix, suffix = name:match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
     if suffix == nil or #suffix < 6 then return false end
     if prefix == "server" then return true end

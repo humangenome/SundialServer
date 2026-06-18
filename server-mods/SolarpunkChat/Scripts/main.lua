@@ -264,13 +264,28 @@ local function clean_name(raw)
     return raw
 end
 
-local function player_name(pc)
+local function is_transient_identity_name(name)
+    if type(name) ~= "string" then return false end
+    if name == "TESTING UID" or name == "ERROR, BAD UNIQUE NET ID" then return true end
+    if name:match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
+    if name:match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
+    local _, suffix = name:match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    return suffix ~= nil and #suffix >= 8
+end
+
+local function player_name(pc, key)
+    local canonical = SP.canonical_name and SP.canonical_name[key]
+    if canonical and canonical ~= "" and not is_transient_identity_name(canonical) then
+        return canonical
+    end
     local nm = ""
     pcall(function()
         local ps = pc.PlayerState
         if ps and ps:IsValid() then nm = ps:GetPlayerName():ToString() end
     end)
-    return clean_name(nm)
+    nm = clean_name(nm)
+    if nm == "" or is_transient_identity_name(nm) then return "" end
+    return nm
 end
 
 local function akey(pc)
@@ -296,7 +311,7 @@ SP.every("chat-joinleave", 1000, 750, function()
         for _, pc in ipairs(cs) do
             if pc and pc:IsValid() and not pc:IsLocalPlayerController() then
                 local k = akey(pc)
-                local name = player_name(pc)
+                local name = player_name(pc, k)
                 if name ~= "" and not SP.kicked[k] then
                     live[k] = name
                     -- greet only once the join transition has settled —

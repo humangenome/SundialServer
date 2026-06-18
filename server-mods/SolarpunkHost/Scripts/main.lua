@@ -202,6 +202,52 @@ local function set_world_slot_fields(obj, label)
     end
 end
 
+local world_slot_enforce_log = {}
+local function enforce_world_slot_fields(obj, label)
+    if not (obj and obj:IsValid()) then return false end
+    local did = false
+    for _, pname in ipairs(WORLD_SLOT_FIELDS) do
+        local before = read_string_prop(obj, pname)
+        local ok = pcall(function() obj[pname] = WORLD_NAME end)
+        if ok then
+            local after = read_string_prop(obj, pname)
+            if before ~= after then
+                did = true
+                local key = tostring(label) .. "." .. pname .. "=" .. tostring(after)
+                if not world_slot_enforce_log[key] then
+                    world_slot_enforce_log[key] = true
+                    log(label .. "." .. pname .. "=" .. tostring(after) ..
+                        " enforced before=" .. tostring(before))
+                end
+            end
+        end
+    end
+    return did
+end
+
+local function enforce_world_slot_runtime(reason)
+    local did = false
+    local gi = FindFirstOf("BP_SkyGameInstance_C")
+    if gi and gi:IsValid() then
+        did = enforce_world_slot_fields(gi, "GameInstance.runtime." .. tostring(reason or "")) or did
+    end
+    local sm = FindFirstOf("BPC_SaveManager_C")
+    if sm and sm:IsValid() then
+        did = enforce_world_slot_fields(sm, "SaveManager.runtime." .. tostring(reason or "")) or did
+    end
+    for _, cname in ipairs({ "LVP_SaveSystem_C", "LVP_SaveSystem" }) do
+        local ok, objs = pcall(FindAllOf, cname)
+        if ok and objs then
+            for _, obj in ipairs(objs) do
+                if obj and obj:IsValid() then
+                    did = enforce_world_slot_fields(obj, cname .. ".runtime." .. tostring(reason or "")) or did
+                end
+            end
+        end
+    end
+    return did
+end
+
 local function log_saveish_string_props(obj, label)
     if not (obj and obj:IsValid()) then return end
     local cls
@@ -244,49 +290,16 @@ local function param_string(p)
     return nil
 end
 
-local ensure_world_slot_alias
 local function rewrite_world_slot_param(p, label)
     local before = param_string(p)
     if not before or before == "" or before == WORLD_NAME then return end
     if before == "Options" or before == "gp_data" then return end
-    ensure_world_slot_alias(before, label)
     local ok = pcall(function() p:set(WORLD_NAME) end)
     log("slot rewrite " .. label .. ": " .. tostring(before) .. " -> " .. WORLD_NAME ..
         " ok=" .. tostring(ok) .. " after=" .. tostring(param_string(p)))
 end
 
 local mirror_log = {}
-local alias_log = {}
-ensure_world_slot_alias = function(slot, reason)
-    if not SAVE_GAMES_DIR then return false end
-    slot = tostring(slot or "")
-    if slot == "" or slot == WORLD_NAME or slot == "Options" or slot == "gp_data" then return false end
-    if slot:find("\\", 1, true) or slot:find("/", 1, true) or slot:find(":", 1, true) then return false end
-    local source = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
-    if not file_exists(source) then return false end
-    local slot_file = slot
-    if slot_file:lower():sub(-4) ~= ".sav" then slot_file = slot_file .. ".sav" end
-    local dst = SAVE_GAMES_DIR .. "\\" .. slot_file
-    local data = read_all(source)
-    if not data or #data == 0 then return false end
-    local tmp = dst .. ".tmp"
-    local f = io.open(tmp, "wb")
-    if not f then return false end
-    f:write(data)
-    f:close()
-    os.remove(dst)
-    local ok = os.rename(tmp, dst)
-    if not ok then os.remove(tmp) end
-    local key = slot_file .. ":" .. tostring(ok) .. ":" .. tostring(#data)
-    if not alias_log[key] then
-        alias_log[key] = true
-        log("world slot alias " .. WORLD_NAME .. ".sav -> " .. slot_file ..
-            " reason=" .. tostring(reason or "") ..
-            " ok=" .. tostring(ok) .. " bytes=" .. tostring(#data))
-    end
-    return ok
-end
-
 local function latest_relevant_save_name()
     if not SAVE_GAMES_DIR then return nil end
     local p = io.popen('dir /b /a-d /o-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
@@ -383,9 +396,11 @@ end
 local function normalize_save_games_dir(reason)
     local mirrored = mirror_active_world_save(reason)
     local archived = archive_orphaned_world_saves(reason)
-    log("save dir normalized reason=" .. tostring(reason or "") ..
-        " mirrored=" .. tostring(mirrored) ..
-        " archived=" .. tostring(archived))
+    if mirrored or archived > 0 or tostring(reason or "") ~= "sweep" then
+        log("save dir normalized reason=" .. tostring(reason or "") ..
+            " mirrored=" .. tostring(mirrored) ..
+            " archived=" .. tostring(archived))
+    end
 end
 
 -- Shared scheduler/state from SolarpunkServerRuntime (see the STABILITY
@@ -442,6 +457,8 @@ local function pname(c)
 end
 local function is_transient_identity_name(nm)
     if nm == "TESTING UID" or nm == "ERROR, BAD UNIQUE NET ID" then return true end
+    if tostring(nm or ""):match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
+    if tostring(nm or ""):match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
     local suffix = tostring(nm or ""):match("^[%w_%-]+%-([0-9A-Fa-f]+)$")
     return suffix ~= nil and #suffix >= 8
 end
@@ -489,6 +506,46 @@ local function validish(obj)
     local ok, v = pcall(function() return obj:IsValid() end)
     if ok then return v end
     return type(obj) ~= "string" and type(obj) ~= "number" and type(obj) ~= "boolean"
+end
+local function object_synthetic_id(obj)
+    if not validish(obj) then return nil end
+    for _, field in ipairs({
+        "UniquePlayerID", "UniquePlayerId", "PlayerID", "PlayerId",
+        "PlayerIDString", "PlayerIdString", "UniqueID", "UniqueId",
+        "SteamID", "SteamId", "UserID", "UserId", "OwnerID", "OwnerId",
+    }) do
+        local sid = read_string_prop(obj, field)
+        if isSynth(sid) then return sid end
+    end
+    return nil
+end
+local function controller_synthetic_id(c)
+    local sid = object_synthetic_id(c)
+    if sid then return sid end
+    local pawn = pawn_of(c)
+    sid = object_synthetic_id(pawn)
+    if sid then return sid end
+    pcall(function()
+        local ps = c.PlayerState
+        sid = object_synthetic_id(ps)
+    end)
+    return sid
+end
+local function trusted_existing_sid(c, k)
+    local sid = controller_synthetic_id(c)
+    if not isSynth(sid) or sid == HOST_SYNTH_ID then return nil end
+    local raw = pname(c)
+    if raw ~= "" and is_transient_identity_name(raw) and sid == synthId(raw) then
+        return nil
+    end
+    if sid == loaded_sid[k] then return sid end
+    local key = tostring(k) .. ":" .. tostring(sid)
+    if not transient_log[key] then
+        transient_log[key] = true
+        log("save identity using existing synthetic id [" .. tostring(k) .. "] sid=" .. sid ..
+            " raw=" .. tostring(raw))
+    end
+    return sid
 end
 local function object_key(obj)
     local k
@@ -825,7 +882,11 @@ end
 local function load_sid_for_controller(c, k)
     if c:IsLocalPlayerController() then return HOST_SYNTH_ID, "host-local" end
     local nm = stable_pname(c, k)
-    if not nm then return nil, nil end
+    if not nm then
+        local sid = trusted_existing_sid(c, k)
+        if sid then return sid, "existing-synthetic" end
+        return nil, nil
+    end
     return synthId(nm), nm
 end
 
@@ -961,6 +1022,7 @@ local save_flush_guard = false
 local function force_save_to_disk(reason)
     if save_flush_guard then return end
     save_flush_guard = true
+    enforce_world_slot_runtime("pre-force-save-" .. tostring(reason or ""))
     local sm = FindFirstOf("BPC_SaveManager_C")
     if sm and sm:IsValid() then
         local ok = pcall(function() sm:SaveToDisk() end)
@@ -977,7 +1039,7 @@ local function save_sid_for_controller(c)
     -- playerdata. Give it its own deterministic server identity.
     if c:IsLocalPlayerController() then return HOST_SYNTH_ID end
     local nm = stable_pname(c, akey(c))
-    if not nm then return nil end
+    if not nm then return trusted_existing_sid(c, akey(c)) end
     return synthId(nm)
 end
 local function reissue_corrected_player_save(c, k, sid, playerdata, why)
@@ -1065,6 +1127,7 @@ SP.every("host-boot", 1000, 0, function()
     log_saveish_string_props(gi, "GameInstance.before")
     set_world_slot_fields(gi, "GameInstance")
     log_saveish_string_props(gi, "GameInstance.after")
+    enforce_world_slot_runtime("pre-host")
     try_install_save_slot_hooks()
     try_install_bld_hook()
     try_install_save_player_hook()
@@ -1112,12 +1175,21 @@ end)
 -- forced world save cadence (the game autosaves too; this is the floor)
 SP.every("host-save", SAVE_INTERVAL_S * 1000, 2000, function()
     if not hosted then return end
+    enforce_world_slot_runtime("periodic")
     local sm = FindFirstOf("BPC_SaveManager_C")
     if sm and sm:IsValid() then
         local ok = pcall(function() sm:SaveToDisk() end)
         log("periodic SaveToDisk ok=" .. tostring(ok))
         if ok then normalize_save_games_dir("periodic") end
     end
+end)
+
+-- Keep the active save slot pinned between the game's own autosaves. This
+-- clears random post-host slot aliases quickly without forcing extra saves.
+SP.every("host-save-normalize", 15000, 7000, function()
+    if not hosted then return end
+    enforce_world_slot_runtime("sweep")
+    normalize_save_games_dir("sweep")
 end)
 
 -- heartbeat into the host status file so the supervisor sees liveness
