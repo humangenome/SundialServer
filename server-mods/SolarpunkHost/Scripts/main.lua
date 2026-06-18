@@ -345,41 +345,10 @@ local function param_string(p)
     return nil
 end
 
-local world_slot_alias_log = {}
-local world_slot_alias_until = {}
-local function alias_world_save_slot(slot, reason)
-    if not SAVE_GAMES_DIR then return false end
-    slot = tostring(slot or "")
-    if slot == "" or slot == WORLD_NAME or slot == "Options" or slot == "gp_data" then return false end
-    if slot:find("[/\\:]") or not slot:match("^[%w_%-]+$") then return false end
-    local src = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
-    local dst = SAVE_GAMES_DIR .. "\\" .. slot .. ".sav"
-    local data = read_all(src)
-    if not data or #data == 0 then return false end
-    local tmp = dst .. ".tmp"
-    local f = io.open(tmp, "wb")
-    if not f then return false end
-    f:write(data)
-    f:close()
-    os.remove(dst)
-    local ok = os.rename(tmp, dst)
-    if not ok then os.remove(tmp) end
-    if ok then world_slot_alias_until[slot .. ".sav"] = os.time() + 45 end
-    local key = tostring(slot) .. ":" .. tostring(reason or "")
-    if not world_slot_alias_log[key] then
-        world_slot_alias_log[key] = true
-        log("world slot alias " .. tostring(slot) .. " -> " .. WORLD_NAME ..
-            " reason=" .. tostring(reason or "") ..
-            " ok=" .. tostring(ok) .. " bytes=" .. tostring(#data))
-    end
-    return ok
-end
-
 local function rewrite_world_slot_param(p, label)
     local before = param_string(p)
     if not before or before == "" or before == WORLD_NAME then return end
     if before == "Options" or before == "gp_data" then return end
-    alias_world_save_slot(before, label)
     enforce_world_slot_runtime("slot-rewrite-" .. tostring(label or ""))
     local ok = pcall(function() p:set(WORLD_NAME) end)
     log("slot rewrite " .. label .. ": " .. tostring(before) .. " -> " .. WORLD_NAME ..
@@ -458,25 +427,18 @@ local function archive_orphaned_world_saves(reason)
     for name in p:lines() do
         local lower = tostring(name or ""):lower()
         if lower ~= world_lower and lower ~= "gp_data.sav" and lower ~= "options.sav" then
-            local keep_until = world_slot_alias_until[name]
-            if keep_until and os.time() < keep_until then
-                log("orphan world save archive deferred " .. tostring(name) ..
-                    " reason=" .. tostring(reason or "") ..
-                    " until=" .. tostring(keep_until))
-            else
-                local src = SAVE_GAMES_DIR .. "\\" .. name
-                local dst = archive_dir .. "\\" .. stamp .. "-" .. name
-                local suffix = 0
-                while file_exists(dst) and suffix < 100 do
-                    suffix = suffix + 1
-                    dst = archive_dir .. "\\" .. stamp .. "-" .. tostring(suffix) .. "-" .. name
-                end
-                local ok = os.rename(src, dst)
-                log("orphan world save archive " .. tostring(name) ..
-                    " reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok) ..
-                    " dst=" .. tostring(dst))
-                if ok then count = count + 1 end
+            local src = SAVE_GAMES_DIR .. "\\" .. name
+            local dst = archive_dir .. "\\" .. stamp .. "-" .. name
+            local suffix = 0
+            while file_exists(dst) and suffix < 100 do
+                suffix = suffix + 1
+                dst = archive_dir .. "\\" .. stamp .. "-" .. tostring(suffix) .. "-" .. name
             end
+            local ok = os.rename(src, dst)
+            log("orphan world save archive " .. tostring(name) ..
+                " reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok) ..
+                " dst=" .. tostring(dst))
+            if ok then count = count + 1 end
         end
     end
     p:close()
