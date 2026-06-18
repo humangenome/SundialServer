@@ -345,10 +345,41 @@ local function param_string(p)
     return nil
 end
 
+local world_slot_alias_log = {}
+local world_slot_alias_until = {}
+local function alias_world_save_slot(slot, reason)
+    if not SAVE_GAMES_DIR then return false end
+    slot = tostring(slot or "")
+    if slot == "" or slot == WORLD_NAME or slot == "Options" or slot == "gp_data" then return false end
+    if slot:find("[/\\:]") or not slot:match("^[%w_%-]+$") then return false end
+    local src = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
+    local dst = SAVE_GAMES_DIR .. "\\" .. slot .. ".sav"
+    local data = read_all(src)
+    if not data or #data == 0 then return false end
+    local tmp = dst .. ".tmp"
+    local f = io.open(tmp, "wb")
+    if not f then return false end
+    f:write(data)
+    f:close()
+    os.remove(dst)
+    local ok = os.rename(tmp, dst)
+    if not ok then os.remove(tmp) end
+    if ok then world_slot_alias_until[slot .. ".sav"] = os.time() + 45 end
+    local key = tostring(slot) .. ":" .. tostring(reason or "")
+    if not world_slot_alias_log[key] then
+        world_slot_alias_log[key] = true
+        log("world slot alias " .. tostring(slot) .. " -> " .. WORLD_NAME ..
+            " reason=" .. tostring(reason or "") ..
+            " ok=" .. tostring(ok) .. " bytes=" .. tostring(#data))
+    end
+    return ok
+end
+
 local function rewrite_world_slot_param(p, label)
     local before = param_string(p)
     if not before or before == "" or before == WORLD_NAME then return end
     if before == "Options" or before == "gp_data" then return end
+    alias_world_save_slot(before, label)
     enforce_world_slot_runtime("slot-rewrite-" .. tostring(label or ""))
     local ok = pcall(function() p:set(WORLD_NAME) end)
     log("slot rewrite " .. label .. ": " .. tostring(before) .. " -> " .. WORLD_NAME ..
@@ -427,18 +458,25 @@ local function archive_orphaned_world_saves(reason)
     for name in p:lines() do
         local lower = tostring(name or ""):lower()
         if lower ~= world_lower and lower ~= "gp_data.sav" and lower ~= "options.sav" then
-            local src = SAVE_GAMES_DIR .. "\\" .. name
-            local dst = archive_dir .. "\\" .. stamp .. "-" .. name
-            local suffix = 0
-            while file_exists(dst) and suffix < 100 do
-                suffix = suffix + 1
-                dst = archive_dir .. "\\" .. stamp .. "-" .. tostring(suffix) .. "-" .. name
+            local keep_until = world_slot_alias_until[name]
+            if keep_until and os.time() < keep_until then
+                log("orphan world save archive deferred " .. tostring(name) ..
+                    " reason=" .. tostring(reason or "") ..
+                    " until=" .. tostring(keep_until))
+            else
+                local src = SAVE_GAMES_DIR .. "\\" .. name
+                local dst = archive_dir .. "\\" .. stamp .. "-" .. name
+                local suffix = 0
+                while file_exists(dst) and suffix < 100 do
+                    suffix = suffix + 1
+                    dst = archive_dir .. "\\" .. stamp .. "-" .. tostring(suffix) .. "-" .. name
+                end
+                local ok = os.rename(src, dst)
+                log("orphan world save archive " .. tostring(name) ..
+                    " reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok) ..
+                    " dst=" .. tostring(dst))
+                if ok then count = count + 1 end
             end
-            local ok = os.rename(src, dst)
-            log("orphan world save archive " .. tostring(name) ..
-                " reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok) ..
-                " dst=" .. tostring(dst))
-            if ok then count = count + 1 end
         end
     end
     p:close()
@@ -890,7 +928,7 @@ local function stamp_playerdata_param(param, sid, why)
         field_stamp_log[key] = true
         log(key .. " ok=" .. tostring(ok_table))
     end
-    return did or ok_table
+    return did or ok_table, patch, s
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
@@ -1153,7 +1191,7 @@ end
 
 local save_player_hooked, save_player_tries = false, 0
 local save_flush_guard = false
-local save_skip_post_once = false
+local pending_corrected_save = {}
 local function force_save_to_disk(reason)
     if save_flush_guard then return end
     save_flush_guard = true
@@ -1176,15 +1214,23 @@ local function save_sid_for_controller(c)
     if not nm then return trusted_existing_sid(c, akey(c)) end
     return synthId(nm)
 end
-local function reissue_corrected_player_save(c, k, sid, playerdata, why)
-    if save_reentry[k] or playerdata == nil then return false end
-    local s
-    if not pcall(function() s = playerdata:get() end) or not validish(s) then return false end
+local function reissue_corrected_player_save(c, k, sid, why, patch, s)
+    if save_reentry[k] then return false end
     save_reentry[k] = true
-    local ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(s) end)
+    local ok2, err2 = false, nil
+    local payload = patch or s
+    local payload_kind = patch and "table" or "struct"
+    if payload ~= nil then
+        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(payload) end)
+    end
+    if not ok2 and s ~= nil and payload ~= s then
+        payload_kind = "struct"
+        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(s) end)
+    end
     save_reentry[k] = nil
     log("SERVER_SavePlayerdata corrected reissue why=" .. tostring(why or "") ..
-        " sid=" .. tostring(sid) .. " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
+        " sid=" .. tostring(sid) .. " payload=" .. tostring(payload_kind) ..
+        " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
     return ok2
 end
 local function try_install_save_player_hook()
@@ -1195,27 +1241,39 @@ local function try_install_save_player_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
+                local k = akey(c)
+                if save_reentry[k] then return end
                 if c:IsLocalPlayerController() then
                     stamp_persistence_ids(c, HOST_SYNTH_ID, "pre-save-local")
-                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-local")
-                    save_skip_post_once = true
+                    local did, patch, s = stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-local")
+                    if did then
+                        pending_corrected_save[k] = { sid = HOST_SYNTH_ID, patch = patch, struct = s, why = "post-save-local" }
+                    end
                     return
                 end
-                local k = akey(c)
                 if SP.kicked[k] then return end
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
-                local did = stamp_playerdata_param(playerdata, sid, "pre-save")
-                if did then reissue_corrected_player_save(c, k, sid, playerdata, "pre-save") end
+                local did, patch, s = stamp_playerdata_param(playerdata, sid, "pre-save")
+                if did then
+                    pending_corrected_save[k] = { sid = sid, patch = patch, struct = s, why = "post-save" }
+                end
             end)
         end, function(self)
             pcall(function()
-                if save_skip_post_once then
-                    save_skip_post_once = false
+                local c = self and self:get()
+                if not (c and c:IsValid()) then return end
+                local k = akey(c)
+                if save_reentry[k] then return end
+                local pending_save = pending_corrected_save[k]
+                if pending_save then
+                    pending_corrected_save[k] = nil
+                    local ok2 = reissue_corrected_player_save(c, k, pending_save.sid,
+                        pending_save.why, pending_save.patch, pending_save.struct)
+                    if ok2 then force_save_to_disk(pending_save.why) end
                     return
                 end
-                local c = self and self:get()
                 if c and c:IsValid() and c:IsLocalPlayerController() then return end
                 force_save_to_disk("post-player-save")
             end)
