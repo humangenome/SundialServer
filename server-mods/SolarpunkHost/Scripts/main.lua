@@ -1156,7 +1156,6 @@ end
 local save_player_hooked, save_player_tries = false, 0
 local save_flush_guard = false
 local save_skip_post_once = false
-local pending_corrected_save = {}
 local function force_save_to_disk(reason)
     if save_flush_guard then return end
     save_flush_guard = true
@@ -1169,7 +1168,6 @@ local function force_save_to_disk(reason)
     end
     save_flush_guard = false
 end
-local save_reentry = {}
 local function save_sid_for_controller(c)
     if not (c and c:IsValid()) then return nil end
     -- The listen-server's local controller is not a real customer player. If we
@@ -1179,25 +1177,6 @@ local function save_sid_for_controller(c)
     if not nm then return trusted_existing_sid(c, akey(c)) end
     return synthId(nm)
 end
-local function reissue_corrected_player_save(c, k, sid, why, patch, s)
-    if save_reentry[k] then return false end
-    save_reentry[k] = true
-    local ok2, err2 = false, nil
-    local payload = s or patch
-    local payload_kind = s and "struct" or "table"
-    if payload ~= nil then
-        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(payload) end)
-    end
-    if not ok2 and s == nil and patch ~= nil and payload ~= patch then
-        payload_kind = "table"
-        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(patch) end)
-    end
-    save_reentry[k] = nil
-    log("SERVER_SavePlayerdata corrected reissue why=" .. tostring(why or "") ..
-        " sid=" .. tostring(sid) .. " payload=" .. tostring(payload_kind) ..
-        " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
-    return ok2
-end
 local function try_install_save_player_hook()
     if save_player_hooked then return end
     save_player_tries = save_player_tries + 1
@@ -1206,20 +1185,15 @@ local function try_install_save_player_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
-                local k = akey(c)
-                if save_reentry[k] then return end
                 if c:IsLocalPlayerController() then
                     save_skip_post_once = true
                     return
                 end
+                local k = akey(c)
                 if SP.kicked[k] then return end
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
-                local did, patch, s = stamp_playerdata_param(playerdata, sid, "pre-save")
-                if did then
-                    pending_corrected_save[k] = { sid = sid, patch = patch, struct = s, why = "post-save" }
-                end
             end)
         end, function(self)
             pcall(function()
@@ -1229,16 +1203,6 @@ local function try_install_save_player_hook()
                 end
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
-                local k = akey(c)
-                if save_reentry[k] then return end
-                local pending_save = pending_corrected_save[k]
-                if pending_save then
-                    pending_corrected_save[k] = nil
-                    local ok2 = reissue_corrected_player_save(c, k, pending_save.sid,
-                        pending_save.why, pending_save.patch, pending_save.struct)
-                    if ok2 then force_save_to_disk(pending_save.why) end
-                    return
-                end
                 if c and c:IsValid() and c:IsLocalPlayerController() then return end
                 force_save_to_disk("post-player-save")
             end)
