@@ -475,6 +475,10 @@ end
 local hosted = false
 local pending = {}     -- [controller addr] = countdown until BeginLoadData re-issue
 local loaded_sid = {}  -- [controller addr] = last synthetic id we re-loaded under
+local first_seen_at = {}
+local blocked_reissue_sid = {}
+local blocked_reissue_log = {}
+local MAX_BEGIN_LOAD_REISSUE_AGE = 12
 
 local function crc32(s)
     local c = 0xFFFFFFFF
@@ -1031,8 +1035,33 @@ local function begin_load_delay(c)
     return 6
 end
 
+local function mark_controller_seen(k)
+    if not first_seen_at[k] then first_seen_at[k] = os.time() end
+    return first_seen_at[k]
+end
+
+local function begin_load_age(k)
+    return os.time() - (first_seen_at[k] or os.time())
+end
+
+local function allow_begin_load_reissue(k, sid, name_label, reason)
+    local age = begin_load_age(k)
+    if age <= MAX_BEGIN_LOAD_REISSUE_AGE then return true end
+    blocked_reissue_sid[k] = sid
+    pending[k] = nil
+    local key = tostring(k) .. ":" .. tostring(sid)
+    if not blocked_reissue_log[key] then
+        blocked_reissue_log[key] = true
+        log("BeginLoadData reissue skipped late [" .. tostring(k) .. "] sid=" ..
+            tostring(sid) .. " name=" .. tostring(name_label or "") ..
+            " age=" .. tostring(age) .. " reason=" .. tostring(reason or ""))
+    end
+    return false
+end
+
 local function drive_pending_begin_load(c, k, sid, name_label)
-    if loaded_sid[k] ~= sid and pending[k] == nil then
+    if loaded_sid[k] ~= sid and blocked_reissue_sid[k] ~= sid and pending[k] == nil then
+        if not allow_begin_load_reissue(k, sid, name_label, "arm") then return end
         pending[k] = begin_load_delay(c)
         if loaded_sid[k] then
             log("save identity changed [" .. tostring(k) .. "]: " ..
@@ -1044,6 +1073,7 @@ local function drive_pending_begin_load(c, k, sid, name_label)
         pending[k] = pending[k] - 1
         if pending[k] <= 0 then
             pending[k] = nil
+            if not allow_begin_load_reissue(k, sid, name_label, "fire") then return end
             local ok = pcall(function() c:BeginLoadData(sid) end) -- load key, lands last
             if ok then
                 loaded_sid[k] = sid
@@ -1065,6 +1095,7 @@ local function tick()
         if c and c:IsValid() then
             local k = akey(c)
             live[k] = true
+            mark_controller_seen(k)
             -- never touch a controller auth already kicked (dying object)
             if not c:IsLocalPlayerController() and not SP.kicked[k] then
                 local sid, name_label = load_sid_for_controller(c, k)
@@ -1085,6 +1116,12 @@ local function tick()
             if SP.canonical_name then SP.canonical_name[k] = nil end
         end
     end
+    for k in pairs(first_seen_at) do
+        if not live[k] then
+            first_seen_at[k] = nil
+            blocked_reissue_sid[k] = nil
+        end
+    end
     for k in pairs(pending) do
         if not live[k] then pending[k] = nil end
     end
@@ -1102,7 +1139,6 @@ end
 -- their hands off the controller until the join transition settles.
 local BLD_CLASS = "/Game/Code/Character/BP_MainPlayerController.BP_MainPlayerController_C"
 local ld_hooked, ld_tries = false, 0
-local immediate_bld_reentry = {}
 local function try_install_bld_hook()
     if ld_hooked then return end
     ld_tries = ld_tries + 1
@@ -1113,11 +1149,16 @@ local function try_install_bld_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
+                mark_controller_seen(k)
                 SP.transition[k] = os.time()       -- join/load transition in flight
                 local key = ""
                 pcall(function() key = p1:get():ToString() end)
                 local sid = select(1, load_sid_for_controller(c, k))
-                if sid and key ~= sid then pending[k] = begin_load_delay(c) end
+                if sid and key ~= sid and blocked_reissue_sid[k] ~= sid then
+                    if allow_begin_load_reissue(k, sid, sid, "pre-hook") then
+                        pending[k] = begin_load_delay(c)
+                    end
+                end
             end)
         end, function(self)
             pcall(function()
@@ -1125,22 +1166,8 @@ local function try_install_bld_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                if immediate_bld_reentry[k] then return end
-                local sid, name_label = load_sid_for_controller(c, k)
-                if not sid or loaded_sid[k] == sid then return end
-                immediate_bld_reentry[k] = true
-                stamp_persistence_ids(c, sid, c:IsLocalPlayerController() and "post-begin-load-local" or "post-begin-load")
-                local ok = pcall(function() c:BeginLoadData(sid) end)
-                immediate_bld_reentry[k] = nil
-                if ok then
-                    loaded_sid[k] = sid
-                    pending[k] = nil
-                    log("BeginLoadData immediate post re-issued [" .. tostring(k) ..
-                        "] sid=" .. sid .. " name=" .. tostring(name_label or ""))
-                else
-                    log("WARN: BeginLoadData immediate post re-issue failed [" ..
-                        tostring(k) .. "] sid=" .. sid .. " name=" .. tostring(name_label or ""))
-                end
+                mark_controller_seen(k)
+                SP.transition[k] = os.time()
             end)
         end)
     end)
