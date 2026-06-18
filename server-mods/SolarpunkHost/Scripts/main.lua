@@ -491,6 +491,16 @@ local function is_blank_id(s)
     return s == "" or s == "TESTING UID" or s == "ERROR, BAD UNIQUE NET ID" or
         s:match("^0+$") ~= nil
 end
+local function is_player_identity_field_name(name)
+    local lower = tostring(name or ""):lower()
+    return lower == "id" or lower:match("^id_") or
+        lower:find("uniqueplayerid", 1, true) or lower:find("unique_player_id", 1, true) or
+        lower:find("playerid", 1, true) or lower:find("player_id", 1, true) or
+        lower:find("playerdataid", 1, true) or lower:find("player_data_id", 1, true) or
+        lower:find("uniqueid", 1, true) or lower:find("unique_id", 1, true) or
+        lower:find("steamid", 1, true) or lower:find("steam_id", 1, true) or
+        lower:find("userid", 1, true) or lower:find("user_id", 1, true)
+end
 local function pawn_of(c)
     if not (c and c:IsValid()) then return nil end
     local pawn
@@ -517,6 +527,32 @@ local function object_synthetic_id(obj)
         local sid = read_string_prop(obj, field)
         if isSynth(sid) then return sid end
     end
+    local cls
+    if not pcall(function() cls = obj:GetClass() end) or not validish(cls) then return nil end
+    local found
+    local guard = 0
+    while validish(cls) and guard < 24 and not found do
+        guard = guard + 1
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                if found then return end
+                pcall(function()
+                    local pfull = tostring(prop:GetFullName())
+                    local kind = pfull:match("^(%a+)Property")
+                    if kind ~= "Str" and kind ~= "Name" then return end
+                    local pname = prop:GetFName():ToString()
+                    if not is_player_identity_field_name(pname) then return end
+                    local sid = read_string_prop(obj, pname)
+                    if isSynth(sid) then found = sid end
+                end)
+            end)
+        end)
+        local sup
+        if not pcall(function() sup = cls:GetSuperStruct() end) then break end
+        if not validish(sup) then break end
+        cls = sup
+    end
+    if found then return found end
     return nil
 end
 local function controller_synthetic_id(c)
@@ -695,9 +731,7 @@ local function prop_kind(prop)
     return full:match("^(%a+)Property") or full
 end
 local function is_player_id_field(name)
-    local lower = tostring(name or ""):lower()
-    return lower == "id" or lower:match("^id_") or lower:find("uniqueplayerid", 1, true) or
-        lower:find("playerid", 1, true) or lower:find("player_id", 1, true)
+    return is_player_identity_field_name(name)
 end
 local function set_struct_matching_string_props(s, predicate, value, label, only_blank)
     if not validish(s) then return false end
@@ -751,6 +785,13 @@ local playerdata_fields = {
     "PlayerdataId", "PlayerDataId", "UniqueID", "UniqueId",
     "SteamID", "SteamId", "UserID", "UserId", "OwnerID", "OwnerId",
     "ID", "Id",
+}
+local controller_id_fields = {
+    "UniquePlayerID", "UniquePlayerId", "UniquePlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363",
+    "PlayerID", "PlayerId", "PlayerIDString", "PlayerIdString",
+    "PlayerdataID", "PlayerDataID", "PlayerdataId", "PlayerDataId",
+    "UniqueID", "UniqueId", "SteamID", "SteamId", "UserID", "UserId",
+    "OwnerID", "OwnerId", "ID", "Id",
 }
 local inventory_id_fields = {
     "InventoryID", "InventoryId", "InventoryUID", "InventoryUid",
@@ -853,18 +894,35 @@ stamp_unique_player_id = function(c, sid, why)
     local did = false
     local ok_pc = pcall(function() c.UniquePlayerID = sid end)
     did = did or ok_pc
+    local scan_pc = set_string_fields(c, controller_id_fields, sid,
+        "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] pc.generated why=" .. tostring(why or ""), false)
+    scan_pc = set_matching_string_props(c, is_player_identity_field_name, sid,
+        "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] pc.scan why=" .. tostring(why or ""), false) or scan_pc
+    did = did or scan_pc
     local pawn = pawn_of(c)
     local ok_pawn = false
+    local scan_pawn = false
     if pawn then
         ok_pawn = pcall(function() pawn.UniquePlayerID = sid end)
         did = did or ok_pawn
+        scan_pawn = set_string_fields(pawn, controller_id_fields, sid,
+            "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] pawn.generated why=" .. tostring(why or ""), false)
+        scan_pawn = set_matching_string_props(pawn, is_player_identity_field_name, sid,
+            "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] pawn.scan why=" .. tostring(why or ""), false) or scan_pawn
+        did = did or scan_pawn
     end
     local ok_ps = false
+    local scan_ps = false
     pcall(function()
         local ps = c.PlayerState
         if ps and ps:IsValid() then
             ok_ps = pcall(function() ps.UniquePlayerID = sid end)
             did = did or ok_ps
+            scan_ps = set_string_fields(ps, controller_id_fields, sid,
+                "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] ps.generated why=" .. tostring(why or ""), false)
+            scan_ps = set_matching_string_props(ps, is_player_identity_field_name, sid,
+                "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] ps.scan why=" .. tostring(why or ""), false) or scan_ps
+            did = did or scan_ps
         end
     end)
     local key = tostring(akey(c)) .. ":" .. sid .. ":" .. tostring(why or "")
@@ -874,7 +932,11 @@ stamp_unique_player_id = function(c, sid, why)
             " why=" .. tostring(why or "") ..
             " pc=" .. tostring(ok_pc) ..
             " pawn=" .. tostring(ok_pawn) ..
-            " ps=" .. tostring(ok_ps))
+            " ps=" .. tostring(ok_ps) ..
+            " pc_scan=" .. tostring(scan_pc) ..
+            " pawn_scan=" .. tostring(scan_pawn) ..
+            " ps_scan=" .. tostring(scan_ps) ..
+            " pc_read=" .. tostring(controller_synthetic_id(c)))
     end
     return did
 end
