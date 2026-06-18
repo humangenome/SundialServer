@@ -883,14 +883,16 @@ local function stamp_playerdata_param(param, sid, why)
             end
         end)
     end)
-    local ok_table = pcall(function() param:set(patch) end)
-    if did then pcall(function() param:set(s) end) end
+    local ok_struct = false
+    if did then ok_struct = pcall(function() param:set(s) end) end
+    local ok_table = false
+    if not did then ok_table = pcall(function() param:set(patch) end) end
     local key = "Playerdata param table-set why=" .. tostring(why or "") .. " sid=" .. sid
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
-        log(key .. " ok=" .. tostring(ok_table))
+        log(key .. " ok=" .. tostring(ok_table) .. " struct_ok=" .. tostring(ok_struct))
     end
-    return did or ok_table, patch, s
+    return did or ok_table or ok_struct, patch, s
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
@@ -1180,20 +1182,39 @@ local function reissue_corrected_player_save(c, k, sid, why, patch, s)
     if save_reentry[k] then return false end
     save_reentry[k] = true
     local ok2, err2 = false, nil
-    local payload = patch or s
-    local payload_kind = patch and "table" or "struct"
+    local payload = s or patch
+    local payload_kind = s and "struct" or "table"
     if payload ~= nil then
         ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(payload) end)
     end
-    if not ok2 and s ~= nil and payload ~= s then
-        payload_kind = "struct"
-        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(s) end)
+    if not ok2 and s == nil and patch ~= nil and payload ~= patch then
+        payload_kind = "table"
+        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(patch) end)
     end
     save_reentry[k] = nil
     log("SERVER_SavePlayerdata corrected reissue why=" .. tostring(why or "") ..
         " sid=" .. tostring(sid) .. " payload=" .. tostring(payload_kind) ..
         " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
     return ok2
+end
+local function flush_pending_corrected_saves(reason)
+    local cs = SP.controllers()
+    if not cs then return end
+    for _, c in ipairs(cs) do
+        if c and c:IsValid() then
+            local k = akey(c)
+            if not save_reentry[k] then
+                local pending_save = pending_corrected_save[k]
+                if pending_save then
+                    pending_corrected_save[k] = nil
+                    local ok2 = reissue_corrected_player_save(c, k, pending_save.sid,
+                        pending_save.why .. "-" .. tostring(reason or "scheduled"),
+                        pending_save.patch, pending_save.struct)
+                    if ok2 then force_save_to_disk(pending_save.why .. "-" .. tostring(reason or "scheduled")) end
+                end
+            end
+        end
+    end
 end
 local function try_install_save_player_hook()
     if save_player_hooked then return end
@@ -1338,6 +1359,11 @@ end)
 SP.every("host-netid", 250, 0, function()
     if not hosted then return end
     tick()
+end)
+
+SP.every("host-player-save-correct", 1000, 750, function()
+    if not hosted then return end
+    flush_pending_corrected_saves("scheduler")
 end)
 
 -- forced world save cadence (the game autosaves too; this is the floor)
