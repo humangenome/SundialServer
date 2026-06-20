@@ -872,31 +872,18 @@ local function stamp_playerdata_param(param, sid, why)
     if not isSynth(sid) or param == nil then return false end
     local s
     if not pcall(function() s = param:get() end) or not validish(s) then return false end
-    local patch = {}
-    for _, field in ipairs(playerdata_fields) do patch[field] = sid end
     local did = set_struct_string_fields(s, playerdata_fields, sid,
         "Playerdata param stamped why=" .. tostring(why or ""), false)
     did = set_struct_matching_string_props(s, is_player_id_field, sid,
         "Playerdata param stamped why=" .. tostring(why or ""), false) or did
-    pcall(function()
-        s:ForEachProperty(function(prop)
-            local pname = prop_name(prop)
-            local kind = prop_kind(prop)
-            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname, kind) then
-                patch[pname] = sid
-            end
-        end)
-    end)
     local ok_struct = false
     if did then ok_struct = pcall(function() param:set(s) end) end
-    local ok_table = false
-    if not did then ok_table = pcall(function() param:set(patch) end) end
-    local key = "Playerdata param table-set why=" .. tostring(why or "") .. " sid=" .. sid
+    local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
-        log(key .. " ok=" .. tostring(ok_table) .. " struct_ok=" .. tostring(ok_struct))
+        log(key .. " struct_changed=" .. tostring(did) .. " struct_ok=" .. tostring(ok_struct))
     end
-    return did or ok_table or ok_struct, patch, s
+    return did or ok_struct
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
@@ -1221,6 +1208,7 @@ local function try_install_save_player_hook()
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
+                stamp_playerdata_param(playerdata, sid, "pre-save")
             end)
         end, function(self)
             pcall(function()
@@ -1231,7 +1219,6 @@ local function try_install_save_player_hook()
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
                 if c and c:IsValid() and c:IsLocalPlayerController() then return end
-                force_save_to_disk("post-player-save")
             end)
         end)
     end)
