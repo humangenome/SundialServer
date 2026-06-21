@@ -43,15 +43,15 @@ struct FSharedPtr {         // TSharedPtr<const FUniqueNetId>
 };
 
 // ----------------------------------------------------------------------------
-// Resolved function signatures (x64 MSVC ABI). Struct-by-value returns use an
-// sret hidden pointer in RDX (after RCX=this).
+// Resolved function signatures (x64 MSVC ABI). Struct-by-value returns use a
+// hidden return pointer in RCX, shifting `this` to RDX.
 // ----------------------------------------------------------------------------
 // TSharedPtr<const FUniqueNetId> FOnlineIdentitySteam::CreateUniquePlayerId(const FString&)
 typedef void* (__fastcall* CreateSteamId_t)(void* self, FSharedPtr* retShared, const FString* str);
 // void FUniqueNetIdRepl::SetUniqueNetId(const TSharedPtr<const FUniqueNetId>&)
 typedef void  (__fastcall* SetUniqueNetId_t)(void* self, const FSharedPtr* shared);
 // FUniqueNetIdRepl ULocalPlayer::GetPreferredUniqueNetId() const  (sret return)
-typedef void* (__fastcall* GetPreferredId_t)(void* self, void* sretRepl);
+typedef void* (__fastcall* GetPreferredId_t)(void* sretRepl, void* self);
 
 static CreateSteamId_t   g_createSteamId      = nullptr;
 static SetUniqueNetId_t  g_setUniqueNetId     = nullptr;
@@ -164,8 +164,8 @@ static bool read_identity_file(wchar_t* idstr, int idLen, wchar_t* seed, int see
 // original (constructs the repl in sret), then replace its inner id with the launcher-written
 // per-character identity. Falling back to the machine name is only for diagnostics/manual dev launches;
 // the launcher requires this hook to load before it writes the connect target.
-static void* __fastcall hk_GetPreferredUniqueNetId(void* self, void* sretRepl) {
-    void* r = g_origGetPreferred(self, sretRepl);
+static void* __fastcall hk_GetPreferredUniqueNetId(void* sretRepl, void* self) {
+    void* r = g_origGetPreferred(sretRepl, self);
     wchar_t seed[180] = L"";
     wchar_t idstr[32] = L"";
     bool fromIdentity = read_identity_file(idstr, 32, seed, 180);
@@ -180,6 +180,9 @@ static void* __fastcall hk_GetPreferredUniqueNetId(void* self, void* sretRepl) {
         g_setUniqueNetId(sretRepl, &shared);
         plog("GetPreferredUniqueNetId -> injected id=%ls (seed=%ls identity=%d)\n",
              idstr, seed, fromIdentity ? 1 : 0);
+    } else {
+        plog("GetPreferredUniqueNetId -> failed to mint id=%ls (seed=%ls identity=%d create=%p set=%p)\n",
+             idstr, seed, fromIdentity ? 1 : 0, g_createSteamId, g_setUniqueNetId);
     }
     return r;
 }
