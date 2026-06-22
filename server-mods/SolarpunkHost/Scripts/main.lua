@@ -868,34 +868,45 @@ local inventory_prop_names = {
     "InventorySystem", "Inventory", "InventoryComponent", "PlayerInventory",
     "MainInventory", "BackpackInventory", "HotbarInventory",
 }
-local function stamp_playerdata_param(param, sid, why)
-    if not isSynth(sid) or param == nil then return false end
-    local s
-    if not pcall(function() s = param:get() end) or not validish(s) then return false end
+local function playerdata_param_id(s)
+    if not validish(s) then return nil end
     local found
     for _, field in ipairs(playerdata_fields) do
         local v = struct_field_string(s, field)
         if v and v ~= "" then found = v; break end
     end
-    if not found then
-        pcall(function()
-            s:ForEachProperty(function(prop)
-                if found then return end
-                local pname = prop_name(prop)
-                local kind = prop_kind(prop)
-                if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
-                    local v = struct_field_string(s, pname)
-                    if v and v ~= "" then found = v end
-                end
-            end)
+    if found then return found end
+    pcall(function()
+        s:ForEachProperty(function(prop)
+            if found then return end
+            local pname = prop_name(prop)
+            local kind = prop_kind(prop)
+            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
+                local v = struct_field_string(s, pname)
+                if v and v ~= "" then found = v end
+            end
         end)
-    end
-    local key = "Playerdata param observed why=" .. tostring(why or "") .. " sid=" .. sid
+    end)
+    return found
+end
+local function stamp_playerdata_param(param, sid, why)
+    if not isSynth(sid) or param == nil then return false end
+    local s
+    if not pcall(function() s = param:get() end) or not validish(s) then return false end
+    local before = playerdata_param_id(s)
+    local label = "Playerdata param stamped why=" .. tostring(why or "")
+    local did = set_struct_string_fields(s, playerdata_fields, sid, label, false)
+    did = set_struct_matching_string_props(s, is_player_id_field, sid, label, false) or did
+    local ok_struct = false
+    if did then ok_struct = pcall(function() param:set(s) end) end
+    local after = playerdata_param_id(s)
+    local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
-        log(key .. " playerdata_id=" .. tostring(found or "") .. " action=none")
+        log(key .. " before=" .. tostring(before or "") .. " after=" .. tostring(after or "") ..
+            " struct_changed=" .. tostring(did) .. " struct_ok=" .. tostring(ok_struct))
     end
-    return found == sid
+    return after == sid or (did and ok_struct)
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
