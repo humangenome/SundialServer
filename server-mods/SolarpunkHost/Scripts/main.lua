@@ -864,6 +864,10 @@ local inventory_id_fields = {
     "InventoryID", "InventoryId", "InventoryUID", "InventoryUid",
     "UniqueInventoryID", "UniqueInventoryId", "InventoryIDString",
     "InventoryIdString", "InventoryUniqueID", "InventoryUniqueId",
+    -- The game typo is real: logs report "RepNotify InvenotryID".
+    "InvenotryID", "InvenotryId", "InvenotryUID", "InvenotryUid",
+    "UniqueInvenotryID", "UniqueInvenotryId", "InvenotryIDString",
+    "InvenotryIdString", "InvenotryUniqueID", "InvenotryUniqueId",
     "OwnerID", "OwnerId", "ID", "Id",
 }
 local playerdata_prop_names = {
@@ -898,11 +902,21 @@ local function playerdata_param_id(s)
 end
 local function stamp_playerdata_param(param, sid, why)
     if not isSynth(sid) or param == nil then return false end
-    local s
-    if not pcall(function() s = param:get() end) or not validish(s) then return false end
-    local before = playerdata_param_id(s)
     local patch = {}
     for _, field in ipairs(playerdata_fields) do patch[field] = sid end
+    local s
+    local ok_get = pcall(function() s = param:get() end)
+    if not ok_get or not validish(s) then
+        local ok_table = pcall(function() param:set(patch) end)
+        local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
+        if not field_stamp_log[key] then
+            field_stamp_log[key] = true
+            log(key .. " get_ok=" .. tostring(ok_get) ..
+                " valid=false table_ok=" .. tostring(ok_table))
+        end
+        return ok_table, patch, nil, ok_table and "table" or "none"
+    end
+    local before = playerdata_param_id(s)
     local label = "Playerdata param stamped why=" .. tostring(why or "")
     local did = set_struct_string_fields(s, playerdata_fields, sid, label, false)
     did = set_struct_matching_string_props(s, is_player_id_field, sid, label, false) or did
@@ -917,9 +931,9 @@ local function stamp_playerdata_param(param, sid, why)
     end)
     local ok_struct = false
     if did then ok_struct = pcall(function() param:set(s) end) end
-    local ok_table = false
-    if not did then ok_table = pcall(function() param:set(patch) end) end
     local after = playerdata_param_id(s)
+    local ok_table = false
+    if after ~= sid then ok_table = pcall(function() param:set(patch) end) end
     local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
@@ -927,7 +941,9 @@ local function stamp_playerdata_param(param, sid, why)
             " struct_changed=" .. tostring(did) .. " struct_ok=" .. tostring(ok_struct) ..
             " table_ok=" .. tostring(ok_table))
     end
-    return after == sid or did or ok_struct or ok_table, patch, s
+    local kind = ok_table and "table" or "struct"
+    local full_struct = (after == sid or did or ok_struct) and s or nil
+    return after == sid or did or ok_struct or ok_table, patch, full_struct, kind
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
@@ -1237,23 +1253,15 @@ local function save_sid_for_controller(c)
     return synthId(nm)
 end
 local save_reentry = {}
-local function reissue_corrected_player_save(c, k, sid, why, patch, s)
+local function reissue_corrected_player_save(c, k, sid, why, s)
     if save_reentry[k] then return false end
+    if not validish(s) then return false end
     save_reentry[k] = true
-    local ok2, err2 = false, nil
-    local payload = s or patch
-    local payload_kind = s and "struct" or "table"
-    if payload ~= nil then
-        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(payload) end)
-    end
-    if not ok2 and patch ~= nil and payload ~= patch then
-        payload_kind = "table"
-        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(patch) end)
-    end
+    local ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(s) end)
     save_reentry[k] = nil
     log("SERVER_SavePlayerdata corrected reissue why=" .. tostring(why or "") ..
-        " sid=" .. tostring(sid) .. " payload=" .. tostring(payload_kind) ..
-        " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
+        " sid=" .. tostring(sid) .. " payload=struct ok=" .. tostring(ok2) ..
+        " err=" .. tostring(err2))
     return ok2
 end
 local function try_install_save_player_hook()
@@ -1274,9 +1282,12 @@ local function try_install_save_player_hook()
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
-                local did, patch, s = stamp_playerdata_param(playerdata, sid, "pre-save")
-                if did then
-                    pending_corrected_save[k] = { sid = sid, patch = patch, struct = s, why = "post-save" }
+                local did, _, s, kind = stamp_playerdata_param(playerdata, sid, "pre-save")
+                if did and kind == "struct" and validish(s) then
+                    local ok2 = reissue_corrected_player_save(c, k, sid, "pre-save", s)
+                    if ok2 then
+                        pending_corrected_save[k] = { sid = sid, why = "post-save" }
+                    end
                 end
             end)
         end, function(self)
@@ -1292,9 +1303,7 @@ local function try_install_save_player_hook()
                 local pending_save = pending_corrected_save[k]
                 if pending_save then
                     pending_corrected_save[k] = nil
-                    local ok2 = reissue_corrected_player_save(c, k, pending_save.sid,
-                        pending_save.why, pending_save.patch, pending_save.struct)
-                    if ok2 then force_save_to_disk(pending_save.why) end
+                    force_save_to_disk(pending_save.why)
                     return
                 end
                 if c and c:IsValid() and c:IsLocalPlayerController() then return end
