@@ -522,6 +522,13 @@ local function is_transient_identity_name(nm)
     local suffix = tostring(nm or ""):match("^[%w_%-]+%-([0-9A-Fa-f]+)$")
     return suffix ~= nil and #suffix >= 8
 end
+local function transient_base_name(nm)
+    local base, suffix = tostring(nm or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return nil end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
+    if not base:match("%l") then return nil end
+    return base
+end
 local transient_log = {}
 local function stable_pname(c, k)
     local raw = pname(c)
@@ -531,6 +538,17 @@ local function stable_pname(c, k)
     end
     if nm == "" then return nil end
     if is_transient_identity_name(nm) then
+        local base = transient_base_name(nm)
+        if base then
+            if SP.canonical_name then SP.canonical_name[k] = base end
+            local key = tostring(k) .. ":" .. tostring(nm) .. ":base"
+            if not transient_log[key] then
+                transient_log[key] = true
+                log("save identity normalized transient [" .. tostring(k) .. "] " ..
+                    tostring(nm) .. " -> " .. tostring(base))
+            end
+            return base
+        end
         local key = tostring(k) .. ":" .. tostring(nm)
         if not transient_log[key] then
             transient_log[key] = true

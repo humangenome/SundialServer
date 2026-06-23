@@ -152,6 +152,14 @@ local function is_transient_identity_name(name)
     return suffix ~= nil and #suffix >= 8
 end
 
+local function transient_base_name(name)
+    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return nil end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
+    if not base:match("%l") then return nil end
+    return base
+end
+
 local function unix_ms()
     return os.time() * 1000
 end
@@ -185,6 +193,8 @@ local function player_name(pc, key)
         if ps and ps:IsValid() then nm = ps:GetPlayerName():ToString() end
     end)
     nm = clean_name(nm)
+    local base = transient_base_name(nm)
+    if base then return base end
     if nm == "" or is_transient_identity_name(nm) then return "" end
     return nm
 end

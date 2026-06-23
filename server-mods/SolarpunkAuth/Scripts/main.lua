@@ -270,6 +270,14 @@ local function is_transient_identity_name(name)
     return suffix ~= nil and #suffix >= 8
 end
 
+local function transient_base_name(name)
+    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return nil end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
+    if not base:match("%l") then return nil end
+    return base
+end
+
 local function player_name(pc)
     local nm = ""
     pcall(function()
@@ -332,6 +340,7 @@ local SP = _G.SolarpunkSP
 if not SP then
     error("SolarpunkAuth requires SolarpunkServerRuntime (load via the orchestrator)")
 end
+SP.canonical_name = SP.canonical_name or {}
 
 -- Build a real FText. KickPlayer / ClientReturnToMainMenuWithTextReason take
 -- an FText, and passing a bare Lua string to a reflected FText arg is an
@@ -401,26 +410,36 @@ local function evaluate(pc)
     if verified[k] or kicked[k] then return end        -- decided already
     local raw = player_name(pc)
     local character, token = split_name(raw)
+    local auth_character = transient_base_name(character) or character
     -- NEVER kick mid-join-transition: KickPlayer on a controller whose
     -- BeginLoadData chain is still running re-enters the engine on a
     -- half-loaded object (UE4SS-on-5.7 AV class). Verdicts that ALLOW are
     -- fine any time; verdicts that KICK wait until the transition settles.
     local can_kick = SP.settled(k)
     -- Ban gate first: a banned synthetic id is rejected regardless of password.
-    if character ~= "" and next(BANNED) ~= nil and BANNED[synth_id(character)] then
+    if auth_character ~= "" and next(BANNED) ~= nil and BANNED[synth_id(auth_character)] then
         if not can_kick then
             if not first_seen[k] then first_seen[k] = os.time() end
             return
         end
         kicked[k] = true
         first_seen[k] = nil
-        log("auth DENY (banned) id=" .. synth_id(character) .. " [" .. tostring(k) .. "] -- kicking")
+        log("auth DENY (banned) id=" .. synth_id(auth_character) .. " [" .. tostring(k) .. "] -- kicking")
         kick_once(pc)
         return
     end
     -- Password gate: an empty CONFIGURED_PASSWORD means the server is open, so
     -- only the ban gate above applies; otherwise require the matching token.
     if CONFIGURED_PASSWORD == "" and is_transient_identity_name(character) then
+        local base = transient_base_name(character)
+        if base then
+            SP.canonical_name[k] = base
+            verified[k] = true
+            first_seen[k] = nil
+            log("auth OK normalized transient '" .. tostring(character) ..
+                "' -> '" .. tostring(base) .. "' [" .. tostring(k) .. "]")
+            return
+        end
         if not first_seen[k] then first_seen[k] = os.time(); return end
         if os.time() - first_seen[k] < GRACE_SECONDS then return end
         if not can_kick then return end
@@ -432,6 +451,7 @@ local function evaluate(pc)
         return
     end
     if CONFIGURED_PASSWORD == "" or (raw ~= "" and token == CONFIGURED_PASSWORD) then
+        if auth_character ~= "" then SP.canonical_name[k] = auth_character end
         verified[k] = true
         first_seen[k] = nil
         log("auth OK for '" .. raw:gsub(AUTH_DELIM .. ".*", AUTH_DELIM .. "<redacted>") .. "' [" .. tostring(k) .. "]")

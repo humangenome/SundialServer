@@ -130,6 +130,14 @@ local function is_phantom_name(name)
     return prefix:match("^[A-Z0-9_%-]+$") ~= nil
 end
 
+local function transient_base_name(name)
+    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return nil end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
+    if not base:match("%l") then return nil end
+    return base
+end
+
 local function ps_of(pc)
     local ps
     pcall(function() ps = pc.PlayerState end)
@@ -343,6 +351,19 @@ local function keep_name(pc, k)
         last_seen[k] = raw
     end
     local cleaned = clean_name(raw)
+    local base = transient_base_name(cleaned)
+    if base then
+        local normalized = base .. raw:sub(#cleaned + 1)
+        good_name[k] = normalized
+        machine_of[cleaned] = k
+        SP.canonical_name[k] = base
+        if raw ~= normalized and set_field(ps, "PlayerNamePrivate", normalized) then
+            call(ps, "OnRep_PlayerName")
+            log("transient name normalized [" .. tostring(k) .. "]: '" ..
+                raw .. "' -> '" .. normalized .. "'")
+        end
+        return
+    end
     if raw ~= "" and not is_phantom_name(cleaned) then
         good_name[k] = raw
         SP.canonical_name[k] = cleaned
