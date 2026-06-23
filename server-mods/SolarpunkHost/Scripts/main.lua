@@ -712,9 +712,133 @@ local function import_text_property(obj, prop, field, value, label, only_blank)
     local key = label .. "." .. field .. "=" .. tostring(value)
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
-        log(label .. "." .. field .. "=" .. tostring(after) .. " import=true")
+        log(label .. "." .. field .. "=" .. tostring(after) ..
+            " import=" .. tostring(after == tostring(value)))
     end
-    return true
+    return after == tostring(value)
+end
+local function normalize_hex32(value)
+    local s = tostring(value or ""):gsub("[^0-9A-Fa-f]", ""):lower()
+    if #s == 32 then return s end
+    return nil
+end
+local function guid_parts(hex)
+    hex = normalize_hex32(hex)
+    if not hex then return nil end
+    return tonumber(hex:sub(1, 8), 16), tonumber(hex:sub(9, 16), 16),
+        tonumber(hex:sub(17, 24), 16), tonumber(hex:sub(25, 32), 16)
+end
+local function uint32_hex(value)
+    local n = type(value) == "number" and value or tonumber(tostring(value or ""))
+    if not n then return nil end
+    return string.format("%08x", n & 0xFFFFFFFF)
+end
+local function guid_hex(value)
+    if value == nil then return nil end
+    if type(value) == "string" then return normalize_hex32(value) end
+    local out
+    if pcall(function() out = value:ToString() end) then
+        local h = normalize_hex32(out)
+        if h then return h end
+    end
+    local a, b, c, d
+    local ok = pcall(function()
+        a, b, c, d = value.A, value.B, value.C, value.D
+    end)
+    if ok then
+        local ha, hb, hc, hd = uint32_hex(a), uint32_hex(b), uint32_hex(c), uint32_hex(d)
+        if ha and hb and hc and hd then return ha .. hb .. hc .. hd end
+    end
+    return nil
+end
+local function read_guid_prop(obj, field)
+    local value
+    if not pcall(function() value = obj[field] end) then return nil end
+    return guid_hex(value)
+end
+local function is_blank_guid(value)
+    local h = normalize_hex32(value)
+    return h == nil or h:match("^0+$") ~= nil
+end
+local function dashed_guid(hex)
+    hex = normalize_hex32(hex)
+    if not hex then return nil end
+    return hex:sub(1, 8) .. "-" .. hex:sub(9, 12) .. "-" ..
+        hex:sub(13, 16) .. "-" .. hex:sub(17, 20) .. "-" .. hex:sub(21, 32)
+end
+local function guid_struct_text(hex)
+    local a, b, c, d = guid_parts(hex)
+    if not a then return nil end
+    return string.format("(A=%u,B=%u,C=%u,D=%u)", a, b, c, d)
+end
+local function assign_guid_value(value, hex)
+    local a, b, c, d = guid_parts(hex)
+    if not a or not validish(value) then return false end
+    local ok = pcall(function()
+        value.A = a
+        value.B = b
+        value.C = c
+        value.D = d
+    end)
+    return ok and guid_hex(value) == normalize_hex32(hex)
+end
+local function import_guid_property(obj, prop, field, hex, label, only_blank)
+    if not validish(obj) or not validish(prop) then return false end
+    hex = normalize_hex32(hex)
+    if not hex then return false end
+    local before = read_guid_prop(obj, field) or read_string_prop(obj, field)
+    if only_blank and not is_blank_guid(before) and not is_blank_id(before) then return false end
+    if normalize_hex32(before) == hex then return false end
+
+    local value
+    if pcall(function() value = obj[field] end) and assign_guid_value(value, hex) then
+        pcall(function() obj[field] = value end)
+        local after = read_guid_prop(obj, field)
+        if after == hex then
+            local key = label .. "." .. field .. "=" .. hex .. ".guid-field"
+            if not field_stamp_log[key] then
+                field_stamp_log[key] = true
+                log(label .. "." .. field .. "=" .. after .. " guid-field=true")
+            end
+            return true
+        end
+    end
+
+    for _, text in ipairs({ hex, hex:upper(), dashed_guid(hex), guid_struct_text(hex) }) do
+        if text then
+            pcall(function()
+                prop:ImportText(text, prop:ContainerPtrToValuePtr(obj), 0, obj)
+            end)
+            local after = read_guid_prop(obj, field) or read_string_prop(obj, field)
+            if normalize_hex32(after) == hex then
+                local key = label .. "." .. field .. "=" .. hex .. ".guid-import"
+                if not field_stamp_log[key] then
+                    field_stamp_log[key] = true
+                    log(label .. "." .. field .. "=" .. tostring(after) ..
+                        " guid-import=true text=" .. tostring(text))
+                end
+                return true
+            end
+        end
+    end
+
+    local key = label .. "." .. field .. "=" .. hex .. ".guid-failed"
+    if not field_stamp_log[key] then
+        field_stamp_log[key] = true
+        log(label .. "." .. field .. " guid-write failed before=" .. tostring(before))
+    end
+    return false
+end
+local function set_guid_fields(obj, fields, value, label, only_blank)
+    if not validish(obj) then return false end
+    local did = false
+    for _, field in ipairs(fields) do
+        local prop = reflection_prop(obj, field)
+        if prop then
+            did = import_guid_property(obj, prop, field, value, label, only_blank) or did
+        end
+    end
+    return did
 end
 local function set_string_fields(obj, fields, value, label, only_blank)
     if not validish(obj) then return false end
@@ -724,6 +848,40 @@ local function set_string_fields(obj, fields, value, label, only_blank)
         if prop then
             did = import_text_property(obj, prop, field, value, label, only_blank) or did
         end
+    end
+    return did
+end
+local prop_kind
+local function set_matching_inventory_props(obj, value, label, only_blank)
+    if not validish(obj) then return false end
+    local cls
+    if not pcall(function() cls = obj:GetClass() end) or not validish(cls) then return false end
+    local did = false
+    local guard = 0
+    while validish(cls) and guard < 24 do
+        guard = guard + 1
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                pcall(function()
+                    local pname = prop:GetFName():ToString()
+                    local lower = pname:lower()
+                    if lower:find("inventory", 1, true) == nil and
+                        lower:find("invenotry", 1, true) == nil then return end
+                    if lower:find("id", 1, true) == nil and
+                        lower:find("uid", 1, true) == nil then return end
+                    local kind = prop_kind(prop)
+                    if kind == "Struct" then
+                        did = import_guid_property(obj, prop, pname, value, label, only_blank) or did
+                    elseif kind == "Str" or kind == "Name" or kind == "Text" then
+                        did = import_text_property(obj, prop, pname, value, label, only_blank) or did
+                    end
+                end)
+            end)
+        end)
+        local sup
+        if not pcall(function() sup = cls:GetSuperStruct() end) then break end
+        if not validish(sup) then break end
+        cls = sup
     end
     return did
 end
@@ -792,10 +950,78 @@ local function prop_name(prop)
     if pcall(function() name = prop:GetName() end) and name and name ~= "" then return name end
     return nil
 end
-local function prop_kind(prop)
+prop_kind = function(prop)
     local full = tostring(prop)
     pcall(function() full = tostring(prop:GetFullName()) end)
     return full:match("^(%a+)Property") or full
+end
+local function struct_field_guid(s, field)
+    if not validish(s) then return nil end
+    local value
+    if not pcall(function() value = s[field] end) then return nil end
+    return guid_hex(value)
+end
+local function set_struct_guid_fields(s, fields, value, label, only_blank)
+    if not validish(s) then return false end
+    local did = false
+    for _, field in ipairs(fields) do
+        local before = struct_field_guid(s, field) or struct_field_string(s, field)
+        if (not only_blank or is_blank_guid(before) or is_blank_id(before)) and
+            normalize_hex32(before) ~= normalize_hex32(value) then
+            local current
+            local ok_get = pcall(function() current = s[field] end)
+            local ok = false
+            if ok_get and assign_guid_value(current, value) then
+                ok = pcall(function() s[field] = current end)
+            end
+            if not ok then
+                ok = pcall(function() s[field] = value end)
+            end
+            local after = struct_field_guid(s, field) or struct_field_string(s, field)
+            if ok and normalize_hex32(after) == normalize_hex32(value) then
+                local key = label .. "." .. field .. "=" .. tostring(value) .. ".struct-guid"
+                if not field_stamp_log[key] then
+                    field_stamp_log[key] = true
+                    log(label .. "." .. field .. "=" .. tostring(after) .. " struct-guid=true")
+                end
+                did = true
+            end
+        end
+    end
+    return did
+end
+local function set_struct_matching_inventory_props(s, value, label, only_blank)
+    if not validish(s) then return false end
+    local did = false
+    local logged_any = false
+    local ok_iter = pcall(function()
+        s:ForEachProperty(function(prop)
+            local pname = prop_name(prop)
+            local kind = prop_kind(prop)
+            if pname and not logged_any then
+                logged_any = true
+                log(label .. ".inventory-field-scan first=" .. pname .. " kind=" .. kind)
+            end
+            if not pname then return end
+            local lower = pname:lower()
+            if lower:find("inventory", 1, true) == nil and
+                lower:find("invenotry", 1, true) == nil then return end
+            if lower:find("id", 1, true) == nil and lower:find("uid", 1, true) == nil then return end
+            if kind == "Struct" then
+                did = set_struct_guid_fields(s, { pname }, value, label, only_blank) or did
+            elseif kind == "Str" or kind == "Name" or kind == "Text" then
+                did = set_struct_string_fields(s, { pname }, value, label, only_blank) or did
+            end
+        end)
+    end)
+    if not ok_iter then
+        local key = label .. ".inventory-field-scan-unavailable"
+        if not field_stamp_log[key] then
+            field_stamp_log[key] = true
+            log(label .. ".inventory-field-scan unavailable")
+        end
+    end
+    return did
 end
 local function is_player_id_field(name)
     return is_player_identity_field_name(name)
@@ -846,6 +1072,14 @@ local function stable_inventory_id(sid)
         crc32("inv-a:" .. sid), crc32("inv-b:" .. sid),
         crc32("inv-c:" .. sid), crc32("inv-d:" .. sid))
 end
+local strict_inventory_id_fields = {
+    "InventoryID", "InventoryId", "InventoryUID", "InventoryUid",
+    "UniqueInventoryID", "UniqueInventoryId", "InventoryIDString",
+    "InventoryIdString", "InventoryUniqueID", "InventoryUniqueId",
+    "InvenotryID", "InvenotryId", "InvenotryUID", "InvenotryUid",
+    "UniqueInvenotryID", "UniqueInvenotryId", "InvenotryIDString",
+    "InvenotryIdString", "InvenotryUniqueID", "InvenotryUniqueId",
+}
 local playerdata_fields = {
     "UniquePlayerID", "UniquePlayerId", "PlayerID", "PlayerId",
     "PlayerIDString", "PlayerIdString", "PlayerdataID", "PlayerDataID",
@@ -945,6 +1179,65 @@ local function stamp_playerdata_param(param, sid, why)
     local full_struct = (after == sid or did or ok_struct) and s or nil
     return after == sid or did or ok_struct or ok_table, patch, full_struct, kind
 end
+local function inventory_param_id(s)
+    if not validish(s) then return nil end
+    local found
+    for _, field in ipairs(strict_inventory_id_fields) do
+        local v = struct_field_guid(s, field) or struct_field_string(s, field)
+        if v and not is_blank_guid(v) and not is_blank_id(v) then found = v; break end
+    end
+    if found then return found end
+    pcall(function()
+        s:ForEachProperty(function(prop)
+            if found then return end
+            local pname = prop_name(prop)
+            local kind = prop_kind(prop)
+            if not pname then return end
+            local lower = pname:lower()
+            if lower:find("inventory", 1, true) == nil and
+                lower:find("invenotry", 1, true) == nil then return end
+            if lower:find("id", 1, true) == nil and lower:find("uid", 1, true) == nil then return end
+            local v
+            if kind == "Struct" then
+                v = struct_field_guid(s, pname)
+            elseif kind == "Str" or kind == "Name" or kind == "Text" then
+                v = struct_field_string(s, pname)
+            end
+            if v and not is_blank_guid(v) and not is_blank_id(v) then found = v end
+        end)
+    end)
+    return found
+end
+local function stamp_inventory_param(param, sid, why)
+    if not isSynth(sid) or param == nil then return false end
+    local inv_id = stable_inventory_id(sid)
+    local s
+    local ok_get = pcall(function() s = param:get() end)
+    if not ok_get or not validish(s) then
+        local key = "Inventory param set why=" .. tostring(why or "") .. " sid=" .. sid
+        if not field_stamp_log[key] then
+            field_stamp_log[key] = true
+            log(key .. " get_ok=" .. tostring(ok_get) .. " valid=false")
+        end
+        return false
+    end
+    local before = inventory_param_id(s)
+    local label = "Inventory param stamped why=" .. tostring(why or "")
+    local did = set_struct_guid_fields(s, strict_inventory_id_fields, inv_id, label, false)
+    did = set_struct_string_fields(s, strict_inventory_id_fields, inv_id, label, false) or did
+    did = set_struct_matching_inventory_props(s, inv_id, label, true) or did
+    local ok_struct = false
+    if did then ok_struct = pcall(function() param:set(s) end) end
+    local after = inventory_param_id(s)
+    local key = "Inventory param set why=" .. tostring(why or "") .. " sid=" .. sid
+    if not field_stamp_log[key] then
+        field_stamp_log[key] = true
+        log(key .. " inv=" .. inv_id .. " before=" .. tostring(before or "") ..
+            " after=" .. tostring(after or "") .. " changed=" .. tostring(did) ..
+            " struct_ok=" .. tostring(ok_struct))
+    end
+    return normalize_hex32(after) == inv_id or did or ok_struct
+end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
     local owners = {
@@ -1001,7 +1294,11 @@ local function stamp_inventory_ids(c, sid, why)
     for _, item in ipairs(out.items) do
         local label = "Inventory ID stamped [" .. tostring(akey(c)) .. "] " ..
             item.label .. " why=" .. tostring(why or "")
+        did = set_guid_fields(item.obj, strict_inventory_id_fields, inv_id, label, false) or did
+        did = set_string_fields(item.obj, strict_inventory_id_fields, inv_id, label, false) or did
+        did = set_guid_fields(item.obj, inventory_id_fields, inv_id, label, true) or did
         did = set_string_fields(item.obj, inventory_id_fields, inv_id, label, true) or did
+        did = set_matching_inventory_props(item.obj, inv_id, label, true) or did
         did = set_matching_string_props(item.obj, function(lower)
             return lower:find("id", 1, true) ~= nil or lower:find("uid", 1, true) ~= nil
         end, inv_id, label, true) or did
@@ -1229,8 +1526,6 @@ end
 
 local save_player_hooked, save_player_tries = false, 0
 local save_flush_guard = false
-local save_skip_post_once = false
-local pending_corrected_save = {}
 local function force_save_to_disk(reason)
     if save_flush_guard then return end
     save_flush_guard = true
@@ -1252,18 +1547,6 @@ local function save_sid_for_controller(c)
     if not nm then return trusted_existing_sid(c, akey(c)) end
     return synthId(nm)
 end
-local save_reentry = {}
-local function reissue_corrected_player_save(c, k, sid, why, s)
-    if save_reentry[k] then return false end
-    if not validish(s) then return false end
-    save_reentry[k] = true
-    local ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(s) end)
-    save_reentry[k] = nil
-    log("SERVER_SavePlayerdata corrected reissue why=" .. tostring(why or "") ..
-        " sid=" .. tostring(sid) .. " payload=struct ok=" .. tostring(ok2) ..
-        " err=" .. tostring(err2))
-    return ok2
-end
 local function try_install_save_player_hook()
     if save_player_hooked then return end
     save_player_tries = save_player_tries + 1
@@ -1272,41 +1555,21 @@ local function try_install_save_player_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                if save_reentry[k] then return end
-                if c:IsLocalPlayerController() then
-                    save_skip_post_once = true
-                    return
-                end
                 if SP.kicked[k] then return end
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
-                local did, _, s, kind = stamp_playerdata_param(playerdata, sid, "pre-save")
-                if did and kind == "struct" and validish(s) then
-                    local ok2 = reissue_corrected_player_save(c, k, sid, "pre-save", s)
-                    if ok2 then
-                        pending_corrected_save[k] = { sid = sid, why = "post-save" }
-                    end
-                end
+                stamp_playerdata_param(playerdata, sid, "pre-save")
             end)
         end, function(self)
             pcall(function()
-                if save_skip_post_once then
-                    save_skip_post_once = false
-                    return
-                end
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
-                local k = akey(c)
-                if save_reentry[k] then return end
-                local pending_save = pending_corrected_save[k]
-                if pending_save then
-                    pending_corrected_save[k] = nil
-                    force_save_to_disk(pending_save.why)
-                    return
-                end
-                if c and c:IsValid() and c:IsLocalPlayerController() then return end
+                if c:IsLocalPlayerController() then return end
+                local sid = save_sid_for_controller(c)
+                if sid then stamp_persistence_ids(c, sid, "post-save") end
             end)
         end)
     end)
@@ -1316,6 +1579,44 @@ local function try_install_save_player_hook()
     elseif save_player_tries >= 60 then
         save_player_hooked = true
         log("SERVER_SavePlayerdata hook FAILED after " .. save_player_tries .. " tries")
+    end
+end
+
+local inventory_apply_hooked, inventory_apply_tries = false, 0
+local function try_install_apply_inventory_hook()
+    if inventory_apply_hooked then return end
+    inventory_apply_tries = inventory_apply_tries + 1
+    local ok = pcall(function()
+        RegisterHook(BLD_CLASS .. ":SERVER_Net_ApplyAndSaveInventory", function(self, inventory)
+            pcall(function()
+                local c = self:get()
+                if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
+                local k = akey(c)
+                if SP.kicked[k] then return end
+                local sid = save_sid_for_controller(c)
+                if not sid then return end
+                stamp_persistence_ids(c, sid, "pre-inventory-apply")
+                stamp_inventory_param(inventory, sid, "pre-inventory-apply")
+            end)
+        end, function(self)
+            pcall(function()
+                local c = self and self:get()
+                if not (c and c:IsValid()) then return end
+                if c:IsLocalPlayerController() then return end
+                local sid = save_sid_for_controller(c)
+                if sid then stamp_persistence_ids(c, sid, "post-inventory-apply") end
+            end)
+        end)
+    end)
+    if ok then
+        inventory_apply_hooked = true
+        log("SERVER_Net_ApplyAndSaveInventory hook installed (attempt " ..
+            inventory_apply_tries .. ")")
+    elseif inventory_apply_tries >= 60 then
+        inventory_apply_hooked = true
+        log("SERVER_Net_ApplyAndSaveInventory hook FAILED after " ..
+            inventory_apply_tries .. " tries")
     end
 end
 
@@ -1368,6 +1669,7 @@ SP.every("host-boot", 1000, 0, function()
     try_install_save_slot_hooks()
     try_install_bld_hook()
     try_install_save_player_hook()
+    try_install_apply_inventory_hook()
     normalize_save_games_dir("pre-host")
 
     -- transport: force IpNetDriver so the headless host binds real UDP
@@ -1396,6 +1698,7 @@ SP.every("host-bld-hook", 1000, 250, function()
     if not hosted then return end
     try_install_bld_hook()
     try_install_save_player_hook()
+    try_install_apply_inventory_hook()
 end)
 
 SP.every("host-save-slot-hooks", 1000, 250, function()
