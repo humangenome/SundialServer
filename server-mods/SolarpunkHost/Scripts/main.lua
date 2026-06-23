@@ -507,6 +507,12 @@ local function clean_name(raw)
     if i then return raw:sub(1, i - 1) end
     return raw
 end
+local function is_legacy_launcher_identity(nm)
+    local base, suffix = tostring(nm or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return false end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return false end
+    return base:match("%l") ~= nil
+end
 local function pname(c)
     local nm = ""
     pcall(function()
@@ -517,17 +523,11 @@ local function pname(c)
 end
 local function is_transient_identity_name(nm)
     if nm == "TESTING UID" or nm == "ERROR, BAD UNIQUE NET ID" then return true end
+    if is_legacy_launcher_identity(nm) then return false end
     if tostring(nm or ""):match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
     if tostring(nm or ""):match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
     local suffix = tostring(nm or ""):match("^[%w_%-]+%-([0-9A-Fa-f]+)$")
     return suffix ~= nil and #suffix >= 8
-end
-local function transient_base_name(nm)
-    local base, suffix = tostring(nm or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
-    if not base or not suffix or #suffix < 8 then return nil end
-    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
-    if not base:match("%l") then return nil end
-    return base
 end
 local transient_log = {}
 local function stable_pname(c, k)
@@ -538,17 +538,6 @@ local function stable_pname(c, k)
     end
     if nm == "" then return nil end
     if is_transient_identity_name(nm) then
-        local base = transient_base_name(nm)
-        if base then
-            if SP.canonical_name then SP.canonical_name[k] = base end
-            local key = tostring(k) .. ":" .. tostring(nm) .. ":base"
-            if not transient_log[key] then
-                transient_log[key] = true
-                log("save identity normalized transient [" .. tostring(k) .. "] " ..
-                    tostring(nm) .. " -> " .. tostring(base))
-            end
-            return base
-        end
         local key = tostring(k) .. ":" .. tostring(nm)
         if not transient_log[key] then
             transient_log[key] = true
@@ -912,19 +901,33 @@ local function stamp_playerdata_param(param, sid, why)
     local s
     if not pcall(function() s = param:get() end) or not validish(s) then return false end
     local before = playerdata_param_id(s)
+    local patch = {}
+    for _, field in ipairs(playerdata_fields) do patch[field] = sid end
     local label = "Playerdata param stamped why=" .. tostring(why or "")
     local did = set_struct_string_fields(s, playerdata_fields, sid, label, false)
     did = set_struct_matching_string_props(s, is_player_id_field, sid, label, false) or did
+    pcall(function()
+        s:ForEachProperty(function(prop)
+            local pname = prop_name(prop)
+            local kind = prop_kind(prop)
+            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
+                patch[pname] = sid
+            end
+        end)
+    end)
     local ok_struct = false
     if did then ok_struct = pcall(function() param:set(s) end) end
+    local ok_table = false
+    if not did then ok_table = pcall(function() param:set(patch) end) end
     local after = playerdata_param_id(s)
     local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
         log(key .. " before=" .. tostring(before or "") .. " after=" .. tostring(after or "") ..
-            " struct_changed=" .. tostring(did) .. " struct_ok=" .. tostring(ok_struct))
+            " struct_changed=" .. tostring(did) .. " struct_ok=" .. tostring(ok_struct) ..
+            " table_ok=" .. tostring(ok_table))
     end
-    return after == sid or (did and ok_struct)
+    return after == sid or did or ok_struct or ok_table, patch, s
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
@@ -1211,6 +1214,7 @@ end
 local save_player_hooked, save_player_tries = false, 0
 local save_flush_guard = false
 local save_skip_post_once = false
+local pending_corrected_save = {}
 local function force_save_to_disk(reason)
     if save_flush_guard then return end
     save_flush_guard = true
@@ -1232,6 +1236,26 @@ local function save_sid_for_controller(c)
     if not nm then return trusted_existing_sid(c, akey(c)) end
     return synthId(nm)
 end
+local save_reentry = {}
+local function reissue_corrected_player_save(c, k, sid, why, patch, s)
+    if save_reentry[k] then return false end
+    save_reentry[k] = true
+    local ok2, err2 = false, nil
+    local payload = s or patch
+    local payload_kind = s and "struct" or "table"
+    if payload ~= nil then
+        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(payload) end)
+    end
+    if not ok2 and patch ~= nil and payload ~= patch then
+        payload_kind = "table"
+        ok2, err2 = pcall(function() c:SERVER_SavePlayerdata(patch) end)
+    end
+    save_reentry[k] = nil
+    log("SERVER_SavePlayerdata corrected reissue why=" .. tostring(why or "") ..
+        " sid=" .. tostring(sid) .. " payload=" .. tostring(payload_kind) ..
+        " ok=" .. tostring(ok2) .. " err=" .. tostring(err2))
+    return ok2
+end
 local function try_install_save_player_hook()
     if save_player_hooked then return end
     save_player_tries = save_player_tries + 1
@@ -1240,16 +1264,20 @@ local function try_install_save_player_hook()
             pcall(function()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
+                local k = akey(c)
+                if save_reentry[k] then return end
                 if c:IsLocalPlayerController() then
                     save_skip_post_once = true
                     return
                 end
-                local k = akey(c)
                 if SP.kicked[k] then return end
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
-                stamp_playerdata_param(playerdata, sid, "pre-save")
+                local did, patch, s = stamp_playerdata_param(playerdata, sid, "pre-save")
+                if did then
+                    pending_corrected_save[k] = { sid = sid, patch = patch, struct = s, why = "post-save" }
+                end
             end)
         end, function(self)
             pcall(function()
@@ -1259,6 +1287,16 @@ local function try_install_save_player_hook()
                 end
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
+                local k = akey(c)
+                if save_reentry[k] then return end
+                local pending_save = pending_corrected_save[k]
+                if pending_save then
+                    pending_corrected_save[k] = nil
+                    local ok2 = reissue_corrected_player_save(c, k, pending_save.sid,
+                        pending_save.why, pending_save.patch, pending_save.struct)
+                    if ok2 then force_save_to_disk(pending_save.why) end
+                    return
+                end
                 if c and c:IsValid() and c:IsLocalPlayerController() then return end
             end)
         end)

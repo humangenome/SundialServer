@@ -143,21 +143,21 @@ local function clean_name(raw)
     return raw
 end
 
+local function is_legacy_launcher_identity(name)
+    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return false end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return false end
+    return base:match("%l") ~= nil
+end
+
 local function is_transient_identity_name(name)
     if type(name) ~= "string" then return false end
     if name == "TESTING UID" or name == "ERROR, BAD UNIQUE NET ID" then return true end
+    if is_legacy_launcher_identity(name) then return false end
     if name:match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
     if name:match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
     local _, suffix = name:match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
     return suffix ~= nil and #suffix >= 8
-end
-
-local function transient_base_name(name)
-    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
-    if not base or not suffix or #suffix < 8 then return nil end
-    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
-    if not base:match("%l") then return nil end
-    return base
 end
 
 local function unix_ms()
@@ -193,8 +193,6 @@ local function player_name(pc, key)
         if ps and ps:IsValid() then nm = ps:GetPlayerName():ToString() end
     end)
     nm = clean_name(nm)
-    local base = transient_base_name(nm)
-    if base then return base end
     if nm == "" or is_transient_identity_name(nm) then return "" end
     return nm
 end

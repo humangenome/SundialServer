@@ -261,21 +261,21 @@ local function split_name(raw)
     return raw:sub(1, i - 1), raw:sub(i + #AUTH_DELIM)
 end
 
+local function is_legacy_launcher_identity(name)
+    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return false end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return false end
+    return base:match("%l") ~= nil
+end
+
 local function is_transient_identity_name(name)
     if type(name) ~= "string" then return false end
     if name == "TESTING UID" or name == "ERROR, BAD UNIQUE NET ID" then return true end
+    if is_legacy_launcher_identity(name) then return false end
     if name:match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
     if name:match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
     local _, suffix = name:match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
     return suffix ~= nil and #suffix >= 8
-end
-
-local function transient_base_name(name)
-    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
-    if not base or not suffix or #suffix < 8 then return nil end
-    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
-    if not base:match("%l") then return nil end
-    return base
 end
 
 local function player_name(pc)
@@ -410,7 +410,7 @@ local function evaluate(pc)
     if verified[k] or kicked[k] then return end        -- decided already
     local raw = player_name(pc)
     local character, token = split_name(raw)
-    local auth_character = transient_base_name(character) or character
+    local auth_character = character
     -- NEVER kick mid-join-transition: KickPlayer on a controller whose
     -- BeginLoadData chain is still running re-enters the engine on a
     -- half-loaded object (UE4SS-on-5.7 AV class). Verdicts that ALLOW are
@@ -431,15 +431,6 @@ local function evaluate(pc)
     -- Password gate: an empty CONFIGURED_PASSWORD means the server is open, so
     -- only the ban gate above applies; otherwise require the matching token.
     if CONFIGURED_PASSWORD == "" and is_transient_identity_name(character) then
-        local base = transient_base_name(character)
-        if base then
-            SP.canonical_name[k] = base
-            verified[k] = true
-            first_seen[k] = nil
-            log("auth OK normalized transient '" .. tostring(character) ..
-                "' -> '" .. tostring(base) .. "' [" .. tostring(k) .. "]")
-            return
-        end
         if not first_seen[k] then first_seen[k] = os.time(); return end
         if os.time() - first_seen[k] < GRACE_SECONDS then return end
         if not can_kick then return end

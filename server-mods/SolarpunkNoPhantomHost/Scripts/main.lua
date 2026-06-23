@@ -116,11 +116,19 @@ end
 
 -- Generated machine-identity shapes observed on this game (OSS Null profile
 -- name): "server-680B752F44B1A" (host), "<MACHINE>-PC-<hex>", and
--- "<launcher-name>-<hex>" during retail joins. Treat the long hex suffix as a
--- transient platform identity so it never becomes the canonical character name.
+-- older launcher identities like "<character>-<hex>". The latter are now valid
+-- legacy identities because some customer installs keep using them as save keys.
+local function is_legacy_launcher_identity(name)
+    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
+    if not base or not suffix or #suffix < 8 then return false end
+    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return false end
+    return base:match("%l") ~= nil
+end
+
 local function is_phantom_name(name)
     if type(name) ~= "string" then return false end
     if name == "TESTING UID" or name == "ERROR, BAD UNIQUE NET ID" then return true end
+    if is_legacy_launcher_identity(name) then return false end
     if name:match("^DESKTOP%-[A-Z0-9%-]+$") then return true end
     if name:match("^[A-Z0-9_%-]+%-PC%-[0-9A-Fa-f]+$") then return true end
     local prefix, suffix = name:match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
@@ -128,14 +136,6 @@ local function is_phantom_name(name)
     if prefix == "server" then return true end
     if #suffix >= 8 then return true end
     return prefix:match("^[A-Z0-9_%-]+$") ~= nil
-end
-
-local function transient_base_name(name)
-    local base, suffix = tostring(name or ""):match("^([%w_%-]+)%-([0-9A-Fa-f]+)$")
-    if not base or not suffix or #suffix < 8 then return nil end
-    if base == "server" or base:match("^DESKTOP") or base:match("%-PC$") then return nil end
-    if not base:match("%l") then return nil end
-    return base
 end
 
 local function ps_of(pc)
@@ -351,19 +351,6 @@ local function keep_name(pc, k)
         last_seen[k] = raw
     end
     local cleaned = clean_name(raw)
-    local base = transient_base_name(cleaned)
-    if base then
-        local normalized = base .. raw:sub(#cleaned + 1)
-        good_name[k] = normalized
-        machine_of[cleaned] = k
-        SP.canonical_name[k] = base
-        if raw ~= normalized and set_field(ps, "PlayerNamePrivate", normalized) then
-            call(ps, "OnRep_PlayerName")
-            log("transient name normalized [" .. tostring(k) .. "]: '" ..
-                raw .. "' -> '" .. normalized .. "'")
-        end
-        return
-    end
     if raw ~= "" and not is_phantom_name(cleaned) then
         good_name[k] = raw
         SP.canonical_name[k] = cleaned
