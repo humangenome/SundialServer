@@ -341,6 +341,7 @@ if not SP then
     error("SolarpunkAuth requires SolarpunkServerRuntime (load via the orchestrator)")
 end
 SP.canonical_name = SP.canonical_name or {}
+SP.invalid_identity = SP.invalid_identity or {}
 
 -- Build a real FText. KickPlayer / ClientReturnToMainMenuWithTextReason take
 -- an FText, and passing a bare Lua string to a reflected FText arg is an
@@ -416,6 +417,21 @@ local function evaluate(pc)
     -- half-loaded object (UE4SS-on-5.7 AV class). Verdicts that ALLOW are
     -- fine any time; verdicts that KICK wait until the transition settles.
     local can_kick = SP.settled(k)
+    if SP.invalid_identity and SP.invalid_identity[k] then
+        if not can_kick then
+            if not first_seen[k] then first_seen[k] = os.time() end
+            return
+        end
+        local detail = SP.invalid_identity[k]
+        kicked[k] = true
+        first_seen[k] = nil
+        log("auth DENY (invalid client identity) name='" .. tostring(raw) ..
+            "' key='" .. tostring(detail.key or "") ..
+            "' sid='" .. tostring(detail.sid or "") ..
+            "' [" .. tostring(k) .. "] -- kicking (update Sundial)")
+        kick_once(pc, IDENTITY_KICK_REASON)
+        return
+    end
     -- Ban gate first: a banned synthetic id is rejected regardless of password.
     if auth_character ~= "" and next(BANNED) ~= nil and BANNED[synth_id(auth_character)] then
         if not can_kick then

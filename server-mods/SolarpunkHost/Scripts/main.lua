@@ -479,6 +479,7 @@ local first_seen_at = {}
 local blocked_reissue_sid = {}
 local blocked_reissue_log = {}
 local MAX_BEGIN_LOAD_REISSUE_AGE = 12
+SP.invalid_identity = SP.invalid_identity or {}
 
 local function crc32(s)
     local c = 0xFFFFFFFF
@@ -1464,6 +1465,7 @@ local function tick()
         if not live[k] then
             first_seen_at[k] = nil
             blocked_reissue_sid[k] = nil
+            if SP.invalid_identity then SP.invalid_identity[k] = nil end
         end
     end
     for k in pairs(pending) do
@@ -1498,6 +1500,22 @@ local function try_install_bld_hook()
                 local key = ""
                 pcall(function() key = p1:get():ToString() end)
                 local sid = select(1, load_sid_for_controller(c, k))
+                if is_blank_id(key) then
+                    if SP.invalid_identity then
+                        SP.invalid_identity[k] = {
+                            key = key,
+                            sid = sid,
+                            name = pname(c),
+                            at = os.time(),
+                        }
+                    end
+                    log("BeginLoadData invalid remote identity [" .. tostring(k) ..
+                        "] key=" .. tostring(key or "") ..
+                        " name=" .. tostring(pname(c)) ..
+                        " sid=" .. tostring(sid or "") ..
+                        " -- awaiting auth kick")
+                    return
+                end
                 if sid and key ~= sid and blocked_reissue_sid[k] ~= sid then
                     if allow_begin_load_reissue(k, sid, sid, "pre-hook") then
                         pending[k] = begin_load_delay(c)
