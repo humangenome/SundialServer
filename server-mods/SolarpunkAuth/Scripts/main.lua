@@ -476,9 +476,9 @@ local function evaluate(pc)
     kick_once(pc)
 end
 
--- Run the gate if a join password is set OR we have a bans file to enforce.
--- An open server with bans still kicks banned ids; a server with neither does
--- not register the sweep at all.
+-- Always run the gate sweep. Open servers still need it for quarantined bad
+-- client identities; if there is no password and no ban hit, evaluate() simply
+-- admits the controller.
 --
 -- ENFORCEMENT = the 1s sweep ONLY. SolarpunkAuth used to also RegisterHook
 -- BP_MainPlayerController:BeginLoadData, but SolarpunkHost's net-id enforcer
@@ -490,36 +490,34 @@ end
 -- window (4s) plus the SP.settled() transition gate mean a legitimate
 -- client is never kicked early and an unauthorized one is kicked seconds
 -- after its join settles.
-if CONFIGURED_PASSWORD ~= "" or BANS_PATH then
-    local ban_reload_ticks = 0
-    SP.every("auth-sweep", 1000, 500, function()
-        -- Refresh the ban list every ~5s so `ban`/`unban` take effect live. A
-        -- newly-banned online player loses `verified` so the next evaluate re-checks.
-        ban_reload_ticks = ban_reload_ticks + 1
-        if ban_reload_ticks >= 5 then
-            ban_reload_ticks = 0
-            load_bans()
-            if next(BANNED) ~= nil then
-                for k in pairs(verified) do verified[k] = nil end
-            end
+local ban_reload_ticks = 0
+SP.every("auth-sweep", 1000, 500, function()
+    -- Refresh the ban list every ~5s so `ban`/`unban` take effect live. A
+    -- newly-banned online player loses `verified` so the next evaluate re-checks.
+    ban_reload_ticks = ban_reload_ticks + 1
+    if ban_reload_ticks >= 5 then
+        ban_reload_ticks = 0
+        load_bans()
+        if next(BANNED) ~= nil then
+            for k in pairs(verified) do verified[k] = nil end
         end
-        local cs = SP.controllers()
-        if not cs then return end
-        local live = {}
-        for _, c in ipairs(cs) do
-            if c and c:IsValid() and not c:IsLocalPlayerController() then
-                live[akey(c)] = true
-                evaluate(c)
-            end
+    end
+    local cs = SP.controllers()
+    if not cs then return end
+    local live = {}
+    for _, c in ipairs(cs) do
+        if c and c:IsValid() and not c:IsLocalPlayerController() then
+            live[akey(c)] = true
+            evaluate(c)
         end
-        -- Addresses are forgotten once the controller leaves so a reused
-        -- address re-checks. (kicked == SP.kicked: this is also what clears
-        -- the shared hands-off set once the dying controller is gone.)
-        for k in pairs(kicked) do if not live[k] then kicked[k] = nil end end
-        for k in pairs(verified) do if not live[k] then verified[k] = nil end end
-        for k in pairs(first_seen) do if not live[k] then first_seen[k] = nil end end
-    end)
+    end
+    -- Addresses are forgotten once the controller leaves so a reused address
+    -- re-checks. (kicked == SP.kicked: this is also what clears the shared
+    -- hands-off set once the dying controller is gone.)
+    for k in pairs(kicked) do if not live[k] then kicked[k] = nil end end
+    for k in pairs(verified) do if not live[k] then verified[k] = nil end end
+    for k in pairs(first_seen) do if not live[k] then first_seen[k] = nil end end
+end)
 
-    log("auth gate active (1s game-thread sweep, name-channel)")
-    write_status(true, true, "gate_active")
-end
+log("auth gate active (1s game-thread sweep, name-channel)")
+write_status(true, true, "gate_active")

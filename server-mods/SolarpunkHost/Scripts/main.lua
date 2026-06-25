@@ -1315,6 +1315,33 @@ local function stamp_persistence_ids(c, sid, why)
     local d = stamp_inventory_ids(c, sid, why)
     return a or b or d
 end
+local invalid_clear_log = {}
+local function clear_invalid_identity_stamp(c, k, key)
+    if not (c and c:IsValid()) then return end
+    local value = tostring(key or "")
+    local label = "Invalid identity cleared [" .. tostring(k) .. "]"
+    local function clear_owner(owner, owner_label)
+        if not validish(owner) then return false end
+        local did = false
+        did = pcall(function() owner.UniquePlayerID = value end) or did
+        did = set_string_fields(owner, controller_id_fields, value,
+            label .. " " .. owner_label .. ".known", false) or did
+        did = set_matching_string_props(owner, is_player_identity_field_name, value,
+            label .. " " .. owner_label .. ".scan", false) or did
+        return did
+    end
+    local did = clear_owner(c, "pc")
+    did = clear_owner(pawn_of(c), "pawn") or did
+    pcall(function()
+        local ps = c.PlayerState
+        did = clear_owner(ps, "ps") or did
+    end)
+    local log_key = tostring(k) .. ":" .. value
+    if not invalid_clear_log[log_key] then
+        invalid_clear_log[log_key] = true
+        log(label .. " key=" .. value .. " changed=" .. tostring(did))
+    end
+end
 local stamped_log = {}
 stamp_unique_player_id = function(c, sid, why)
     if not (c and c:IsValid()) or not isSynth(sid) then return false end
@@ -1418,6 +1445,10 @@ local function drive_pending_begin_load(c, k, sid, name_label)
         " prior=" .. tostring(prior or ""))
 end
 
+local function controller_blocked(k)
+    return SP.kicked[k] or (SP.invalid_identity and SP.invalid_identity[k])
+end
+
 local function tick()
     local cs = SP.controllers()
     if not cs then return end
@@ -1427,8 +1458,9 @@ local function tick()
             local k = akey(c)
             live[k] = true
             mark_controller_seen(k)
-            -- never touch a controller auth already kicked (dying object)
-            if not c:IsLocalPlayerController() and not SP.kicked[k] then
+            -- never touch a controller auth already kicked (dying object) or
+            -- quarantined for a bad client identity.
+            if not c:IsLocalPlayerController() and not controller_blocked(k) then
                 local sid, name_label = load_sid_for_controller(c, k)
                 if sid then
                     stamp_persistence_ids(c, sid, "tick")
@@ -1486,6 +1518,9 @@ local function try_install_bld_hook()
                 pcall(function() key = p1:get():ToString() end)
                 local sid = select(1, load_sid_for_controller(c, k))
                 if is_blank_id(key) then
+                    pending[k] = nil
+                    loaded_sid[k] = nil
+                    clear_invalid_identity_stamp(c, k, key)
                     if SP.invalid_identity then
                         SP.invalid_identity[k] = {
                             key = key,
@@ -1498,7 +1533,7 @@ local function try_install_bld_hook()
                         "] key=" .. tostring(key or "") ..
                         " name=" .. tostring(pname(c)) ..
                         " sid=" .. tostring(sid or "") ..
-                        " -- awaiting auth kick")
+                        " -- quarantined pending auth kick")
                     return
                 end
                 if sid and key ~= sid and blocked_reissue_sid[k] ~= sid then
@@ -1559,7 +1594,7 @@ local function try_install_save_player_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                if SP.kicked[k] then return end
+                if controller_blocked(k) then return end
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-save")
@@ -1570,6 +1605,7 @@ local function try_install_save_player_hook()
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
                 if c:IsLocalPlayerController() then return end
+                if controller_blocked(akey(c)) then return end
                 local sid = save_sid_for_controller(c)
                 if sid then stamp_persistence_ids(c, sid, "post-save") end
             end)
@@ -1595,7 +1631,7 @@ local function try_install_apply_inventory_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                if SP.kicked[k] then return end
+                if controller_blocked(k) then return end
                 local sid = save_sid_for_controller(c)
                 if not sid then return end
                 stamp_persistence_ids(c, sid, "pre-inventory-apply")
@@ -1606,6 +1642,7 @@ local function try_install_apply_inventory_hook()
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
                 if c:IsLocalPlayerController() then return end
+                if controller_blocked(akey(c)) then return end
                 local sid = save_sid_for_controller(c)
                 if sid then stamp_persistence_ids(c, sid, "post-inventory-apply") end
             end)
