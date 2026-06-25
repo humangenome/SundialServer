@@ -451,7 +451,10 @@ end
 
 local function normalize_save_games_dir(reason)
     local mirrored = mirror_active_world_save(reason)
-    local archived = archive_orphaned_world_saves(reason)
+    -- Leave engine-generated world slot files in place. The game can continue
+    -- probing that original slot after we mirror it to World1.sav; moving it
+    -- causes missing-save reads during joins.
+    local archived = 0
     if mirrored or archived > 0 or tostring(reason or "") ~= "sweep" then
         log("save dir normalized reason=" .. tostring(reason or "") ..
             " mirrored=" .. tostring(mirrored) ..
@@ -473,8 +476,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local hosted = false
-local pending = {}     -- [controller addr] = countdown until BeginLoadData re-issue
-local loaded_sid = {}  -- [controller addr] = last synthetic id we re-loaded under
+local pending = {}     -- [controller addr] = legacy reissue state; kept for cleanup compatibility
+local loaded_sid = {}  -- [controller addr] = last synthetic id observed for the controller
 local first_seen_at = {}
 local blocked_reissue_sid = {}
 local blocked_reissue_log = {}
@@ -1405,31 +1408,14 @@ local function allow_begin_load_reissue(k, sid, name_label, reason)
 end
 
 local function drive_pending_begin_load(c, k, sid, name_label)
-    if loaded_sid[k] ~= sid and blocked_reissue_sid[k] ~= sid and pending[k] == nil then
-        if not allow_begin_load_reissue(k, sid, name_label, "arm") then return end
-        pending[k] = begin_load_delay(c)
-        if loaded_sid[k] then
-            log("save identity changed [" .. tostring(k) .. "]: " ..
-                tostring(loaded_sid[k]) .. " -> " .. sid ..
-                " (name=" .. tostring(name_label or "") .. "); re-arming BeginLoadData")
-        end
-    end
-    if pending[k] then
-        pending[k] = pending[k] - 1
-        if pending[k] <= 0 then
-            pending[k] = nil
-            if not allow_begin_load_reissue(k, sid, name_label, "fire") then return end
-            local ok = pcall(function() c:BeginLoadData(sid) end) -- load key, lands last
-            if ok then
-                loaded_sid[k] = sid
-                log("BeginLoadData re-issued [" .. tostring(k) .. "] sid=" .. sid ..
-                    " name=" .. tostring(name_label or ""))
-            else
-                log("WARN: BeginLoadData re-issue failed [" .. tostring(k) ..
-                    "] sid=" .. sid .. " name=" .. tostring(name_label or ""))
-            end
-        end
-    end
+    if loaded_sid[k] == sid then return end
+    local prior = loaded_sid[k]
+    loaded_sid[k] = sid
+    blocked_reissue_sid[k] = sid
+    pending[k] = nil
+    log("BeginLoadData reissue suppressed [" .. tostring(k) .. "] sid=" .. sid ..
+        " name=" .. tostring(name_label or "") ..
+        " prior=" .. tostring(prior or ""))
 end
 
 local function tick()
@@ -1446,10 +1432,9 @@ local function tick()
                 local sid, name_label = load_sid_for_controller(c, k)
                 if sid then
                     stamp_persistence_ids(c, sid, "tick")
-                    -- The launcher/client name keeper can correct the PlayerState name
-                    -- after the game's first BeginLoadData call. When that happens,
-                    -- re-load under the corrected character id so the load key and
-                    -- save key do not split for the session.
+                    -- Keep stamping the corrected id, but do not re-enter
+                    -- BeginLoadData from Lua. UE4SS-on-5.7 can crash the host
+                    -- when this happens during the join transition.
                     drive_pending_begin_load(c, k, sid, name_label)
                 end
             end
@@ -1517,9 +1502,8 @@ local function try_install_bld_hook()
                     return
                 end
                 if sid and key ~= sid and blocked_reissue_sid[k] ~= sid then
-                    if allow_begin_load_reissue(k, sid, sid, "pre-hook") then
-                        pending[k] = begin_load_delay(c)
-                    end
+                    stamp_persistence_ids(c, sid, "begin-load-hook")
+                    drive_pending_begin_load(c, k, sid, sid)
                 end
             end)
         end, function(self)
