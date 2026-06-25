@@ -1407,7 +1407,7 @@ local function load_sid_for_controller(c, k)
 end
 
 local function begin_load_delay(c)
-    return 6
+    return 5
 end
 
 local function mark_controller_seen(k)
@@ -1434,15 +1434,35 @@ local function allow_begin_load_reissue(k, sid, name_label, reason)
     return false
 end
 
-local function drive_pending_begin_load(c, k, sid, name_label)
+local function schedule_begin_load_reissue(c, k, sid, name_label, reason)
     if loaded_sid[k] == sid then return end
-    local prior = loaded_sid[k]
+    if pending[k] and pending[k].sid == sid then return end
+    local delay = begin_load_delay(c)
+    pending[k] = {
+        sid = sid,
+        name = name_label,
+        due = os.time() + delay,
+        reason = reason,
+    }
+    log("BeginLoadData reissue scheduled [" .. tostring(k) .. "] sid=" .. sid ..
+        " name=" .. tostring(name_label or "") ..
+        " delay=" .. tostring(delay) ..
+        " reason=" .. tostring(reason or ""))
+end
+
+local function drive_pending_begin_load(c, k, sid, name_label, reason)
+    local job = pending[k]
+    if not job or job.sid ~= sid then return end
+    if os.time() < (job.due or 0) then return end
+    if not allow_begin_load_reissue(k, sid, name_label, reason or job.reason) then return end
+    pending[k] = nil
     loaded_sid[k] = sid
     blocked_reissue_sid[k] = sid
-    pending[k] = nil
-    log("BeginLoadData reissue suppressed [" .. tostring(k) .. "] sid=" .. sid ..
-        " name=" .. tostring(name_label or "") ..
-        " prior=" .. tostring(prior or ""))
+    local ok, err = pcall(function() c:BeginLoadData(sid) end)
+    log("BeginLoadData reissued [" .. tostring(k) .. "] sid=" .. sid ..
+        " name=" .. tostring(name_label or job.name or "") ..
+        " ok=" .. tostring(ok) ..
+        " err=" .. tostring(err))
 end
 
 local function controller_blocked(k)
@@ -1464,10 +1484,7 @@ local function tick()
                 local sid, name_label = load_sid_for_controller(c, k)
                 if sid then
                     stamp_persistence_ids(c, sid, "tick")
-                    -- Keep stamping the corrected id, but do not re-enter
-                    -- BeginLoadData from Lua. UE4SS-on-5.7 can crash the host
-                    -- when this happens during the join transition.
-                    drive_pending_begin_load(c, k, sid, name_label)
+                    drive_pending_begin_load(c, k, sid, name_label, "tick")
                 end
             end
         end
@@ -1518,27 +1535,35 @@ local function try_install_bld_hook()
                 pcall(function() key = p1:get():ToString() end)
                 local sid = select(1, load_sid_for_controller(c, k))
                 if is_blank_id(key) then
-                    pending[k] = nil
-                    loaded_sid[k] = nil
-                    clear_invalid_identity_stamp(c, k, key)
-                    if SP.invalid_identity then
-                        SP.invalid_identity[k] = {
-                            key = key,
-                            sid = sid,
-                            name = pname(c),
-                            at = os.time(),
-                        }
+                    if sid then
+                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        schedule_begin_load_reissue(c, k, sid, pname(c), "natural-blank-key")
+                    else
+                        pending[k] = nil
+                        loaded_sid[k] = nil
+                        clear_invalid_identity_stamp(c, k, key)
+                        if SP.invalid_identity then
+                            SP.invalid_identity[k] = {
+                                key = key,
+                                sid = sid,
+                                name = pname(c),
+                                at = os.time(),
+                            }
+                        end
+                        log("BeginLoadData invalid remote identity [" .. tostring(k) ..
+                            "] key=" .. tostring(key or "") ..
+                            " name=" .. tostring(pname(c)) ..
+                            " sid=" .. tostring(sid or "") ..
+                            " -- quarantined pending auth kick")
                     end
-                    log("BeginLoadData invalid remote identity [" .. tostring(k) ..
-                        "] key=" .. tostring(key or "") ..
-                        " name=" .. tostring(pname(c)) ..
-                        " sid=" .. tostring(sid or "") ..
-                        " -- quarantined pending auth kick")
                     return
                 end
-                if sid and key ~= sid and blocked_reissue_sid[k] ~= sid then
-                    stamp_persistence_ids(c, sid, "begin-load-hook")
-                    drive_pending_begin_load(c, k, sid, sid)
+                if isSynth(key) then
+                    loaded_sid[k] = key
+                    pending[k] = nil
+                    if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                elseif sid and key ~= sid and blocked_reissue_sid[k] ~= sid then
+                    schedule_begin_load_reissue(c, k, sid, pname(c), "natural-mismatch-key")
                 end
             end)
         end, function(self)
