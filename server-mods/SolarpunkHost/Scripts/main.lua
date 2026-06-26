@@ -19,9 +19,10 @@
 --   LOCALAPPDATA (cmd /c set LOCALAPPDATA=<instance dir> && exe...).
 --
 -- NET-ID (see host_netid_enforcer.lua / IMPLEMENTATION-SPEC.md):
---   load key is a BP FString param stuck at "TESTING UID"; fix = re-issue
---   BeginLoadData(synth) from the tick loop after each natural load; save key
---   (UniquePlayerID variable) set every tick to the same synth id.
+--   The launcher must provide the synthetic load key up front. BP hook param
+--   rewrites do not reach the BP VM, and delayed BeginLoadData reissues can
+--   reset inventory ownership mid-session. Bad remote load keys now fail
+--   closed; save hooks only stamp direct known fields.
 --   synth = "765611900" + crc32(lower(playername)) % 1e9.
 --
 -- CONFIG (SolarpunkServer\appsettings.json, panel-written):
@@ -165,6 +166,11 @@ local function write_host_status(hosting, reason)
 end
 write_host_status(false, "booting")
 
+-- These UE4SS builds have crashed during broad property enumeration on live
+-- controller/save objects. Keep the known-field writes, but do not scan class
+-- property lists in join/save/tick paths.
+local ENABLE_DYNAMIC_FIELD_SCANS = false
+
 local WORLD_SLOT_FIELDS = {
     "WorldSaveName",
     "WorldName",
@@ -206,6 +212,7 @@ end
 
 local dynamic_world_slot_log = {}
 local function set_dynamic_world_slot_fields(obj, label)
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return false end
     if not (obj and obj:IsValid()) then return false end
     local cls
     if not pcall(function() cls = obj:GetClass() end) or not (cls and cls:IsValid()) then return false end
@@ -304,6 +311,7 @@ local function enforce_world_slot_runtime(reason)
 end
 
 local function log_saveish_string_props(obj, label)
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return end
     if not (obj and obj:IsValid()) then return end
     local cls
     if not pcall(function() cls = obj:GetClass() end) or not (cls and cls:IsValid()) then return end
@@ -479,9 +487,6 @@ local hosted = false
 local pending = {}     -- [controller addr] = legacy reissue state; kept for cleanup compatibility
 local loaded_sid = {}  -- [controller addr] = last synthetic id observed for the controller
 local first_seen_at = {}
-local blocked_reissue_sid = {}
-local blocked_reissue_log = {}
-local MAX_BEGIN_LOAD_REISSUE_AGE = 12
 SP.invalid_identity = SP.invalid_identity or {}
 
 local function crc32(s)
@@ -598,6 +603,7 @@ local function object_synthetic_id(obj)
         local sid = read_string_prop(obj, field)
         if isSynth(sid) then return sid end
     end
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return nil end
     local cls
     if not pcall(function() cls = obj:GetClass() end) or not validish(cls) then return nil end
     local found
@@ -673,6 +679,7 @@ local function candidate_prop(owner, pname)
     return nil
 end
 local function collect_named_props(owner, label, predicate, out)
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return end
     if not validish(owner) then return end
     local cls
     if not pcall(function() cls = owner:GetClass() end) or not validish(cls) then return end
@@ -857,6 +864,7 @@ local function set_string_fields(obj, fields, value, label, only_blank)
 end
 local prop_kind
 local function set_matching_inventory_props(obj, value, label, only_blank)
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return false end
     if not validish(obj) then return false end
     local cls
     if not pcall(function() cls = obj:GetClass() end) or not validish(cls) then return false end
@@ -890,6 +898,7 @@ local function set_matching_inventory_props(obj, value, label, only_blank)
     return did
 end
 local function set_matching_string_props(obj, predicate, value, label, only_blank)
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return false end
     if not validish(obj) then return false end
     local cls
     if not pcall(function() cls = obj:GetClass() end) or not validish(cls) then return false end
@@ -995,6 +1004,7 @@ local function set_struct_guid_fields(s, fields, value, label, only_blank)
     return did
 end
 local function set_struct_matching_inventory_props(s, value, label, only_blank)
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return false end
     if not validish(s) then return false end
     local did = false
     local logged_any = false
@@ -1031,6 +1041,7 @@ local function is_player_id_field(name)
     return is_player_identity_field_name(name)
 end
 local function set_struct_matching_string_props(s, predicate, value, label, only_blank)
+    if not ENABLE_DYNAMIC_FIELD_SCANS then return false end
     if not validish(s) then return false end
     local did = false
     local logged_any = false
@@ -1125,17 +1136,19 @@ local function playerdata_param_id(s)
         if v and v ~= "" then found = v; break end
     end
     if found then return found end
-    pcall(function()
-        s:ForEachProperty(function(prop)
-            if found then return end
-            local pname = prop_name(prop)
-            local kind = prop_kind(prop)
-            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
-                local v = struct_field_string(s, pname)
-                if v and v ~= "" then found = v end
-            end
+    if ENABLE_DYNAMIC_FIELD_SCANS then
+        pcall(function()
+            s:ForEachProperty(function(prop)
+                if found then return end
+                local pname = prop_name(prop)
+                local kind = prop_kind(prop)
+                if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
+                    local v = struct_field_string(s, pname)
+                    if v and v ~= "" then found = v end
+                end
+            end)
         end)
-    end)
+    end
     return found
 end
 local function stamp_playerdata_param(param, sid, why)
@@ -1158,15 +1171,17 @@ local function stamp_playerdata_param(param, sid, why)
     local label = "Playerdata param stamped why=" .. tostring(why or "")
     local did = set_struct_string_fields(s, playerdata_fields, sid, label, false)
     did = set_struct_matching_string_props(s, is_player_id_field, sid, label, false) or did
-    pcall(function()
-        s:ForEachProperty(function(prop)
-            local pname = prop_name(prop)
-            local kind = prop_kind(prop)
-            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
-                patch[pname] = sid
-            end
+    if ENABLE_DYNAMIC_FIELD_SCANS then
+        pcall(function()
+            s:ForEachProperty(function(prop)
+                local pname = prop_name(prop)
+                local kind = prop_kind(prop)
+                if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
+                    patch[pname] = sid
+                end
+            end)
         end)
-    end)
+    end
     local ok_struct = false
     if did then ok_struct = pcall(function() param:set(s) end) end
     local after = playerdata_param_id(s)
@@ -1191,25 +1206,27 @@ local function inventory_param_id(s)
         if v and not is_blank_guid(v) and not is_blank_id(v) then found = v; break end
     end
     if found then return found end
-    pcall(function()
-        s:ForEachProperty(function(prop)
-            if found then return end
-            local pname = prop_name(prop)
-            local kind = prop_kind(prop)
-            if not pname then return end
-            local lower = pname:lower()
-            if lower:find("inventory", 1, true) == nil and
-                lower:find("invenotry", 1, true) == nil then return end
-            if lower:find("id", 1, true) == nil and lower:find("uid", 1, true) == nil then return end
-            local v
-            if kind == "Struct" then
-                v = struct_field_guid(s, pname)
-            elseif kind == "Str" or kind == "Name" or kind == "Text" then
-                v = struct_field_string(s, pname)
-            end
-            if v and not is_blank_guid(v) and not is_blank_id(v) then found = v end
+    if ENABLE_DYNAMIC_FIELD_SCANS then
+        pcall(function()
+            s:ForEachProperty(function(prop)
+                if found then return end
+                local pname = prop_name(prop)
+                local kind = prop_kind(prop)
+                if not pname then return end
+                local lower = pname:lower()
+                if lower:find("inventory", 1, true) == nil and
+                    lower:find("invenotry", 1, true) == nil then return end
+                if lower:find("id", 1, true) == nil and lower:find("uid", 1, true) == nil then return end
+                local v
+                if kind == "Struct" then
+                    v = struct_field_guid(s, pname)
+                elseif kind == "Str" or kind == "Name" or kind == "Text" then
+                    v = struct_field_string(s, pname)
+                end
+                if v and not is_blank_guid(v) and not is_blank_id(v) then found = v end
+            end)
         end)
-    end)
+    end
     return found
 end
 local function stamp_inventory_param(param, sid, why)
@@ -1311,6 +1328,7 @@ local function stamp_inventory_ids(c, sid, why)
 end
 local function stamp_persistence_ids(c, sid, why)
     local a = stamp_unique_player_id(c, sid, why)
+    if tostring(why or "") == "tick" then return a end
     local b = stamp_playerdata_record(c, sid, why)
     local d = stamp_inventory_ids(c, sid, why)
     return a or b or d
@@ -1395,6 +1413,47 @@ stamp_unique_player_id = function(c, sid, why)
     return did
 end
 
+local invalid_begin_load_log = {}
+local function reject_remote_identity(c, k, key, sid, reason)
+    pending[k] = nil
+    loaded_sid[k] = nil
+    if SP.invalid_identity then
+        SP.invalid_identity[k] = {
+            key = tostring(key or ""),
+            sid = sid,
+            name = pname(c),
+            at = os.time(),
+            reason = tostring(reason or ""),
+        }
+    end
+    -- Put any unavoidable original save under the host quarantine identity
+    -- instead of letting the game persist another blank/customer-corrupting key.
+    stamp_unique_player_id(c, HOST_SYNTH_ID, "invalid-identity-" .. tostring(reason or ""))
+    local log_key = tostring(k) .. ":" .. tostring(key or "") .. ":" .. tostring(reason or "")
+    if not invalid_begin_load_log[log_key] then
+        invalid_begin_load_log[log_key] = true
+        log("BeginLoadData invalid remote identity [" .. tostring(k) ..
+            "] key=" .. tostring(key or "") ..
+            " name=" .. tostring(pname(c)) ..
+            " sid=" .. tostring(sid or "") ..
+            " reason=" .. tostring(reason or "") ..
+            " -- quarantined pending auth kick")
+    end
+end
+
+local quarantined_save_log = {}
+local function quarantine_unowned_save(c, k, why)
+    if not (c and c:IsValid()) then return end
+    local did = stamp_unique_player_id(c, HOST_SYNTH_ID, tostring(why or ""))
+    local log_key = tostring(k) .. ":" .. tostring(why or "")
+    if not quarantined_save_log[log_key] then
+        quarantined_save_log[log_key] = true
+        log("save identity quarantined [" .. tostring(k) .. "] sid=" ..
+            HOST_SYNTH_ID .. " why=" .. tostring(why or "") ..
+            " changed=" .. tostring(did))
+    end
+end
+
 local function load_sid_for_controller(c, k)
     if c:IsLocalPlayerController() then return nil, nil end
     local nm = stable_pname(c, k)
@@ -1406,63 +1465,9 @@ local function load_sid_for_controller(c, k)
     return synthId(nm), nm
 end
 
-local function begin_load_delay(c)
-    return 5
-end
-
 local function mark_controller_seen(k)
     if not first_seen_at[k] then first_seen_at[k] = os.time() end
     return first_seen_at[k]
-end
-
-local function begin_load_age(k)
-    return os.time() - (first_seen_at[k] or os.time())
-end
-
-local function allow_begin_load_reissue(k, sid, name_label, reason)
-    local age = begin_load_age(k)
-    if age <= MAX_BEGIN_LOAD_REISSUE_AGE then return true end
-    blocked_reissue_sid[k] = sid
-    pending[k] = nil
-    local key = tostring(k) .. ":" .. tostring(sid)
-    if not blocked_reissue_log[key] then
-        blocked_reissue_log[key] = true
-        log("BeginLoadData reissue skipped late [" .. tostring(k) .. "] sid=" ..
-            tostring(sid) .. " name=" .. tostring(name_label or "") ..
-            " age=" .. tostring(age) .. " reason=" .. tostring(reason or ""))
-    end
-    return false
-end
-
-local function schedule_begin_load_reissue(c, k, sid, name_label, reason)
-    if loaded_sid[k] == sid then return end
-    if pending[k] and pending[k].sid == sid then return end
-    local delay = begin_load_delay(c)
-    pending[k] = {
-        sid = sid,
-        name = name_label,
-        due = os.time() + delay,
-        reason = reason,
-    }
-    log("BeginLoadData reissue scheduled [" .. tostring(k) .. "] sid=" .. sid ..
-        " name=" .. tostring(name_label or "") ..
-        " delay=" .. tostring(delay) ..
-        " reason=" .. tostring(reason or ""))
-end
-
-local function drive_pending_begin_load(c, k, sid, name_label, reason)
-    local job = pending[k]
-    if not job or job.sid ~= sid then return end
-    if os.time() < (job.due or 0) then return end
-    if not allow_begin_load_reissue(k, sid, name_label, reason or job.reason) then return end
-    pending[k] = nil
-    loaded_sid[k] = sid
-    blocked_reissue_sid[k] = sid
-    local ok, err = pcall(function() c:BeginLoadData(sid) end)
-    log("BeginLoadData reissued [" .. tostring(k) .. "] sid=" .. sid ..
-        " name=" .. tostring(name_label or job.name or "") ..
-        " ok=" .. tostring(ok) ..
-        " err=" .. tostring(err))
 end
 
 local function controller_blocked(k)
@@ -1482,10 +1487,7 @@ local function tick()
             -- quarantined for a bad client identity.
             if not c:IsLocalPlayerController() and not controller_blocked(k) then
                 local sid, name_label = load_sid_for_controller(c, k)
-                if sid then
-                    stamp_persistence_ids(c, sid, "tick")
-                    drive_pending_begin_load(c, k, sid, name_label, "tick")
-                end
+                if sid then stamp_persistence_ids(c, sid, "tick") end
             end
         end
     end
@@ -1498,7 +1500,6 @@ local function tick()
     for k in pairs(first_seen_at) do
         if not live[k] then
             first_seen_at[k] = nil
-            blocked_reissue_sid[k] = nil
             if SP.invalid_identity then SP.invalid_identity[k] = nil end
         end
     end
@@ -1514,8 +1515,8 @@ end
 -- THE single BeginLoadData hook for the whole stack (SolarpunkAuth's gate
 -- runs off its sweep; it no longer registers a second hook on this UFunction
 -- — two Lua hooks on the same BP function dispatching during the join
--- transition was a prime crash suspect on UE4SS-on-5.7). Besides arming the
--- net-id re-issue, the hook stamps SP.transition so Roster/Chat/Auth keep
+-- transition was a prime crash suspect on UE4SS-on-5.7). The hook now fails
+-- closed on bad load keys and stamps SP.transition so Roster/Chat/Auth keep
 -- their hands off the controller until the join transition settles.
 local BLD_CLASS = "/Game/Code/Character/BP_MainPlayerController.BP_MainPlayerController_C"
 local ld_hooked, ld_tries = false, 0
@@ -1535,35 +1536,20 @@ local function try_install_bld_hook()
                 pcall(function() key = p1:get():ToString() end)
                 local sid = select(1, load_sid_for_controller(c, k))
                 if is_blank_id(key) then
-                    if sid then
-                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
-                        schedule_begin_load_reissue(c, k, sid, pname(c), "natural-blank-key")
-                    else
-                        pending[k] = nil
-                        loaded_sid[k] = nil
-                        clear_invalid_identity_stamp(c, k, key)
-                        if SP.invalid_identity then
-                            SP.invalid_identity[k] = {
-                                key = key,
-                                sid = sid,
-                                name = pname(c),
-                                at = os.time(),
-                            }
-                        end
-                        log("BeginLoadData invalid remote identity [" .. tostring(k) ..
-                            "] key=" .. tostring(key or "") ..
-                            " name=" .. tostring(pname(c)) ..
-                            " sid=" .. tostring(sid or "") ..
-                            " -- quarantined pending auth kick")
-                    end
+                    reject_remote_identity(c, k, key, sid, "blank-load-key")
                     return
                 end
                 if isSynth(key) then
+                    if sid and key ~= sid then
+                        reject_remote_identity(c, k, key, sid, "synthetic-key-mismatch")
+                        return
+                    end
                     loaded_sid[k] = key
                     pending[k] = nil
                     if SP.invalid_identity then SP.invalid_identity[k] = nil end
-                elseif sid and key ~= sid and blocked_reissue_sid[k] ~= sid then
-                    schedule_begin_load_reissue(c, k, sid, pname(c), "natural-mismatch-key")
+                    stamp_unique_player_id(c, key, "begin-load-valid")
+                else
+                    reject_remote_identity(c, k, key, sid, "non-synthetic-load-key")
                 end
             end)
         end, function(self)
@@ -1619,9 +1605,16 @@ local function try_install_save_player_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                if controller_blocked(k) then return end
+                if SP.kicked[k] then return end
+                if SP.invalid_identity and SP.invalid_identity[k] then
+                    quarantine_unowned_save(c, k, "pre-save-invalid-identity")
+                    return
+                end
                 local sid = save_sid_for_controller(c)
-                if not sid then return end
+                if not sid then
+                    quarantine_unowned_save(c, k, "pre-save-no-sid")
+                    return
+                end
                 stamp_persistence_ids(c, sid, "pre-save")
                 stamp_playerdata_param(playerdata, sid, "pre-save")
             end)
@@ -1656,9 +1649,16 @@ local function try_install_apply_inventory_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                if controller_blocked(k) then return end
+                if SP.kicked[k] then return end
+                if SP.invalid_identity and SP.invalid_identity[k] then
+                    quarantine_unowned_save(c, k, "pre-inventory-invalid-identity")
+                    return
+                end
                 local sid = save_sid_for_controller(c)
-                if not sid then return end
+                if not sid then
+                    quarantine_unowned_save(c, k, "pre-inventory-no-sid")
+                    return
+                end
                 stamp_persistence_ids(c, sid, "pre-inventory-apply")
                 stamp_inventory_param(inventory, sid, "pre-inventory-apply")
             end)
