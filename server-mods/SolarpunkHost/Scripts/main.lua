@@ -484,8 +484,9 @@ end
 -- ---------------------------------------------------------------------------
 
 local hosted = false
-local pending = {}     -- [controller addr] = legacy reissue state; kept for cleanup compatibility
+local pending = {}     -- [controller addr] = one-shot corrected BeginLoadData recovery
 local loaded_sid = {}  -- [controller addr] = last synthetic id observed for the controller
+local load_reissued_sid = {}
 local first_seen_at = {}
 SP.invalid_identity = SP.invalid_identity or {}
 
@@ -1470,6 +1471,75 @@ local function mark_controller_seen(k)
     return first_seen_at[k]
 end
 
+local MAX_BEGIN_LOAD_RECOVERY_AGE = 3
+local function begin_load_age(k)
+    return os.time() - (first_seen_at[k] or os.time())
+end
+
+local function recovered_load_already(k, sid)
+    return isSynth(sid) and (loaded_sid[k] == sid or load_reissued_sid[k] == sid)
+end
+
+local recovery_log = {}
+local function schedule_begin_load_recovery(c, k, key, sid, name_label, reason)
+    if not isSynth(sid) then return false end
+    if recovered_load_already(k, sid) then return false end
+    local age = begin_load_age(k)
+    if age > MAX_BEGIN_LOAD_RECOVERY_AGE then
+        local log_key = tostring(k) .. ":" .. tostring(sid) .. ":late"
+        if not recovery_log[log_key] then
+            recovery_log[log_key] = true
+            log("BeginLoadData recovery skipped late [" .. tostring(k) ..
+                "] key=" .. tostring(key or "") ..
+                " sid=" .. tostring(sid or "") ..
+                " name=" .. tostring(name_label or "") ..
+                " age=" .. tostring(age) ..
+                " reason=" .. tostring(reason or ""))
+        end
+        return false
+    end
+    pending[k] = {
+        key = tostring(key or ""),
+        sid = sid,
+        name = name_label,
+        reason = tostring(reason or ""),
+        due_tick = (SP.tick or 0) + 1,
+        scheduled_at = os.time(),
+    }
+    local log_key = tostring(k) .. ":" .. tostring(sid) .. ":" .. tostring(reason or "")
+    if not recovery_log[log_key] then
+        recovery_log[log_key] = true
+        log("BeginLoadData recovery scheduled [" .. tostring(k) ..
+            "] key=" .. tostring(key or "") ..
+            " sid=" .. tostring(sid) ..
+            " name=" .. tostring(name_label or "") ..
+            " due_tick=" .. tostring(pending[k].due_tick) ..
+            " reason=" .. tostring(reason or ""))
+    end
+    return true
+end
+
+local function drive_pending_begin_load(c, k)
+    local job = pending[k]
+    if not job then return end
+    if (SP.tick or 0) < (job.due_tick or 0) then return end
+    pending[k] = nil
+    if begin_load_age(k) > MAX_BEGIN_LOAD_RECOVERY_AGE then
+        reject_remote_identity(c, k, job.key or "", job.sid, "late-load-recovery")
+        return
+    end
+    loaded_sid[k] = job.sid
+    load_reissued_sid[k] = job.sid
+    stamp_persistence_ids(c, job.sid, "begin-load-recovery")
+    local ok, err = pcall(function() c:BeginLoadData(job.sid) end)
+    log("BeginLoadData recovered [" .. tostring(k) ..
+        "] key=" .. tostring(job.key or "") ..
+        " sid=" .. tostring(job.sid) ..
+        " name=" .. tostring(job.name or "") ..
+        " ok=" .. tostring(ok) ..
+        " err=" .. tostring(err))
+end
+
 local function controller_blocked(k)
     return SP.kicked[k] or (SP.invalid_identity and SP.invalid_identity[k])
 end
@@ -1487,19 +1557,24 @@ local function tick()
             -- quarantined for a bad client identity.
             if not c:IsLocalPlayerController() and not controller_blocked(k) then
                 local sid, name_label = load_sid_for_controller(c, k)
-                if sid then stamp_persistence_ids(c, sid, "tick") end
+                if sid then
+                    stamp_persistence_ids(c, sid, "tick")
+                    drive_pending_begin_load(c, k)
+                end
             end
         end
     end
     for k in pairs(loaded_sid) do
         if not live[k] then
             loaded_sid[k] = nil
+            load_reissued_sid[k] = nil
             if SP.canonical_name then SP.canonical_name[k] = nil end
         end
     end
     for k in pairs(first_seen_at) do
         if not live[k] then
             first_seen_at[k] = nil
+            load_reissued_sid[k] = nil
             if SP.invalid_identity then SP.invalid_identity[k] = nil end
         end
     end
@@ -1534,9 +1609,17 @@ local function try_install_bld_hook()
                 SP.transition[k] = os.time()       -- join/load transition in flight
                 local key = ""
                 pcall(function() key = p1:get():ToString() end)
-                local sid = select(1, load_sid_for_controller(c, k))
+                local sid, name_label = load_sid_for_controller(c, k)
                 if is_blank_id(key) then
-                    reject_remote_identity(c, k, key, sid, "blank-load-key")
+                    if recovered_load_already(k, sid) then
+                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        stamp_unique_player_id(c, sid, "begin-load-recover-blank-key-duplicate")
+                    elseif sid and schedule_begin_load_recovery(c, k, key, sid, name_label, "blank-load-key") then
+                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        stamp_unique_player_id(c, sid, "begin-load-recover-blank-key")
+                    else
+                        reject_remote_identity(c, k, key, sid, "blank-load-key")
+                    end
                     return
                 end
                 if isSynth(key) then
@@ -1549,7 +1632,15 @@ local function try_install_bld_hook()
                     if SP.invalid_identity then SP.invalid_identity[k] = nil end
                     stamp_unique_player_id(c, key, "begin-load-valid")
                 else
-                    reject_remote_identity(c, k, key, sid, "non-synthetic-load-key")
+                    if recovered_load_already(k, sid) then
+                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key-duplicate")
+                    elseif sid and schedule_begin_load_recovery(c, k, key, sid, name_label, "non-synthetic-load-key") then
+                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key")
+                    else
+                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key")
+                    end
                 end
             end)
         end, function(self)
@@ -1608,11 +1699,13 @@ local function try_install_save_player_hook()
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
                     quarantine_unowned_save(c, k, "pre-save-invalid-identity")
+                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-invalid-identity")
                     return
                 end
                 local sid = save_sid_for_controller(c)
                 if not sid then
                     quarantine_unowned_save(c, k, "pre-save-no-sid")
+                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-no-sid")
                     return
                 end
                 stamp_persistence_ids(c, sid, "pre-save")
@@ -1652,11 +1745,13 @@ local function try_install_apply_inventory_hook()
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
                     quarantine_unowned_save(c, k, "pre-inventory-invalid-identity")
+                    stamp_inventory_param(inventory, HOST_SYNTH_ID, "pre-inventory-invalid-identity")
                     return
                 end
                 local sid = save_sid_for_controller(c)
                 if not sid then
                     quarantine_unowned_save(c, k, "pre-inventory-no-sid")
+                    stamp_inventory_param(inventory, HOST_SYNTH_ID, "pre-inventory-no-sid")
                     return
                 end
                 stamp_persistence_ids(c, sid, "pre-inventory-apply")
