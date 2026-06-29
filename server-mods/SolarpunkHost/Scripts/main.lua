@@ -563,6 +563,12 @@ local function akey(c)
     return k
 end
 local function isSynth(s) return s ~= nil and s:find("^765611900%d") ~= nil end
+local sid_lock_log = {}
+local function locked_sid_for_controller(k)
+    local sid = loaded_sid[k] or load_reissued_sid[k]
+    if isSynth(sid) and sid ~= HOST_SYNTH_ID then return sid end
+    return nil
+end
 local function is_blank_id(s)
     s = tostring(s or "")
     return s == "" or s == "TESTING UID" or s == "ERROR, BAD UNIQUE NET ID" or
@@ -1457,6 +1463,22 @@ end
 
 local function load_sid_for_controller(c, k)
     if c:IsLocalPlayerController() then return nil, nil end
+    local locked = locked_sid_for_controller(k)
+    if locked then
+        local nm = stable_pname(c, k)
+        local desired = nm and synthId(nm) or nil
+        if desired and desired ~= locked then
+            local log_key = tostring(k) .. ":" .. tostring(locked) .. ":" .. tostring(desired)
+            if not sid_lock_log[log_key] then
+                sid_lock_log[log_key] = true
+                log("save identity locked [" .. tostring(k) ..
+                    "] sid=" .. tostring(locked) ..
+                    " ignoring_later_name=" .. tostring(nm) ..
+                    " later_sid=" .. tostring(desired))
+            end
+        end
+        return locked, "loaded-synthetic"
+    end
     local nm = stable_pname(c, k)
     if not nm then
         local sid = trusted_existing_sid(c, k)
@@ -1682,8 +1704,25 @@ local function save_sid_for_controller(c)
     -- The listen-server's local controller is not a real customer player. If we
     -- stamp or re-save it, the game can persist customer state under host-local.
     if c:IsLocalPlayerController() then return nil end
-    local nm = stable_pname(c, akey(c))
-    if not nm then return trusted_existing_sid(c, akey(c)) end
+    local k = akey(c)
+    local locked = locked_sid_for_controller(k)
+    if locked then
+        local nm = stable_pname(c, k)
+        local desired = nm and synthId(nm) or nil
+        if desired and desired ~= locked then
+            local log_key = tostring(k) .. ":" .. tostring(locked) .. ":" .. tostring(desired) .. ":save"
+            if not sid_lock_log[log_key] then
+                sid_lock_log[log_key] = true
+                log("save identity using locked load sid [" .. tostring(k) ..
+                    "] sid=" .. tostring(locked) ..
+                    " ignoring_later_name=" .. tostring(nm) ..
+                    " later_sid=" .. tostring(desired))
+            end
+        end
+        return locked
+    end
+    local nm = stable_pname(c, k)
+    if not nm then return trusted_existing_sid(c, k) end
     return synthId(nm)
 end
 local function try_install_save_player_hook()
