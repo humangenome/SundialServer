@@ -14,3 +14,7 @@ data/
 chat-*.json
 roster.json
 motd.txt
+
+# CHANGELOG.md is internal commentary only — never push to GitHub. Lives
+# locally at ../sundial-internal/CHANGELOG.md (symlinked here for convenience).
+CHANGELOG.md

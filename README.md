@@ -7,7 +7,7 @@
 
 SundialServer is the open-source host supervisor for Sundial multiplayer in **Solarpunk**. It starts and watches the hosted game process, takes and restores save snapshots, exposes an admin HTTP API, answers Source A2S query, and runs Source RCON.
 
-Players join with the [Sundial launcher](https://github.com/HumanGenome/Sundial). A playable host also needs Sundial's in-game runtime (a `ue4ss\` folder with Sundial's server mods, plus the native plugin) next to the `SolarpunkServer\` folder — the **release zip bundles this runtime**, so a downloaded server is complete. Building from this source yourself produces the supervisor only; see [Installation](#installation).
+Players join with the [Sundial app](https://github.com/HumanGenome/Sundial). A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin), which the **release zip bundles** as an `ue4ss-server\` folder — you copy its contents into the game's `Binaries\Win64` directory once. Building from this source yourself produces the supervisor only; see [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
 
 ## Features
 
@@ -43,16 +43,17 @@ Release builds are self-contained; a separate .NET install is not required for n
 [SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) ships the complete Sundial server runtime already installed and handles ports, updates, and panel integration.
 
 ### Self-host
-1. Download `Sundial-Server-Windows-x64-v<version>.zip` from the [latest release](https://github.com/HumanGenome/SundialServer/releases/latest). It is self-contained: `SolarpunkServer\` (the supervisor + `appsettings.json`) plus the in-game runtime (`ue4ss\` and the native plugin).
+1. Download `SundialServer-v<version>.zip` from the [latest release](https://github.com/HumanGenome/SundialServer/releases/latest). It is self-contained: `SolarpunkServer\` (the supervisor + `appsettings.json`) plus the in-game runtime under `ue4ss-server\`.
 2. Extract it to a stable folder, such as `C:\Solarpunk\`.
 3. Install the Solarpunk game files under the folder set as `GameInstallRoot` (default `C:\Solarpunk\game`) — copy your `steamapps\common\Solarpunk` folder there, or install with SteamCMD (app `1805110`). The server runs headless; no GPU is required.
-4. Edit `SolarpunkServer\appsettings.json` (see below).
-5. Open/forward the ports listed below.
-6. Run `SolarpunkServer\SolarpunkServer.exe`.
+4. Copy the **contents** of `SolarpunkServer\ue4ss-server\` into `<GameInstallRoot>\Solarpunk\Binaries\Win64\`. The supervisor launches the game but does not stage the runtime for you — see [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
+5. Edit `SolarpunkServer\appsettings.json` (see below).
+6. Open/forward the ports listed below.
+7. Run `SolarpunkServer\SolarpunkServer.exe`.
 
-Players connect with the Sundial launcher to `<host>:<GameplayPort>`.
+Players connect with the Sundial app to `<host>:<GameplayPort>`.
 
-> **Note:** the release zip above is complete — it bundles the in-game runtime (the `ue4ss\` folder with UE4SS + Sundial's server mods, plus the native plugin) alongside the MIT-licensed supervisor. If you instead build SundialServer from this source, you get the supervisor only; the runtime must then sit next to the `SolarpunkServer\` folder, or the game runs as a plain Solarpunk listen server (no password gate, chat, roster, or admin tools). Managed hosting includes the runtime.
+> **Note:** the release zip is complete — it bundles the in-game runtime (UE4SS + Sundial's server mods + the native plugin) alongside the MIT-licensed supervisor. If you build SundialServer from this source instead, you get the supervisor only; without the runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat, roster, or admin tools. Managed hosting includes the runtime and stages it for you.
 
 ## Server Settings
 
@@ -74,6 +75,8 @@ SundialServer reads `appsettings.json` (next to `SolarpunkServer.exe`) under the
 | `MaxPlayers` | `4` | Slot count reported to the launcher and query clients. |
 | `SnapshotsEnabled` | `true` | Auto-snapshot on every game auto-save. When `false`, only admin-triggered snapshots run. |
 | `PluginHeartbeatTimeoutSeconds` | `30` | Seconds before SundialServer treats the game runtime as unresponsive. |
+| `WorldName` | `World1` | World save slot. The world persists across restarts under this name. |
+| `SaveIntervalSeconds` | `300` | Floor for forced world saves. The game's own autosave still runs. |
 | `Mods` | empty | Mod manifest published at `GET /api/v1/manifest`: `Required`, `Recommended`, and `Blocked` lists. Re-read on edit; no restart needed. |
 
 Keep the ports unique for each server instance. The standard layout is:
@@ -132,11 +135,17 @@ Mod-registered slash commands also run over RCON, with or without the leading `/
 git clone https://github.com/HumanGenome/SundialServer.git
 cd SundialServer
 dotnet build Solarpunk.Server.sln -c Release
-dotnet test Solarpunk.Server.sln -c Release --no-build
 dotnet publish SolarpunkServer/SolarpunkServer.csproj -c Release -r win-x64 --self-contained true
 ```
 
 Published output lands under `SolarpunkServer/bin/Release/net8.0/win-x64/publish/`.
+
+## Documentation
+
+- [docs/ADMIN.md](docs/ADMIN.md) — settings, ports, RCON, the HTTP API, health, snapshots
+- [docs/RUNTIME.md](docs/RUNTIME.md) — boot chain, world persistence, save identity, join auth, troubleshooting
+- [docs/MODS.md](docs/MODS.md) — the mod stack, status files, writing your own host mod
+- [protocol/](protocol/) — wire-format contracts (manifest, chat, map, ModKit, installer)
 
 ## Community Note
 
