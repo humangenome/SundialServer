@@ -81,12 +81,11 @@ public sealed class HeartbeatWatchdogService : BackgroundService
     }
 
     private static readonly TimeSpan LuaStatusBootstrapGrace = TimeSpan.FromSeconds(45);
-    // Wider grace for the no-connection-at-all case: covers the cold-
-    // start window where the game process is launching but SolarpunkPlugin.dll hasn't
-    // connected the pipe yet. Solarpunk cold launches can take 30-60s on a
-    // panel-managed Win Server box. After this window without a pipe,
-    // SolarpunkServer concludes UE4SS / SolarpunkLoader / SolarpunkPlugin.dll never
-    // loaded successfully and fail-closes.
+    private static readonly TimeSpan LuaStatusFreshWindow = TimeSpan.FromSeconds(90);
+    // Wider grace for the no-connection-at-all case: covers the cold-start
+    // window where the game process is launching and the Lua runtime has not
+    // published a current auth-ready status yet. The native pipe is optional on
+    // the panel-managed Solarpunk path; Lua status is the authoritative gate.
     private static readonly TimeSpan NoConnectionFailClosedGrace = TimeSpan.FromSeconds(180);
     private DateTimeOffset _lastLuaFailClosedWarnAt = DateTimeOffset.MinValue;
     private readonly DateTimeOffset _serverStartedAt = DateTimeOffset.UtcNow;
@@ -123,6 +122,24 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         //      path-scoped KillGame AND PluginPid-based kill.
         if (string.IsNullOrEmpty(_opts.SolarpunkAuthPassword)) return;
 
+        string statusPath;
+        try
+        {
+            var baseDir = AppContext.BaseDirectory;
+            statusPath = Path.Combine(baseDir, ".solarpunk-auth-status");
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "SolarpunkAuth status path resolve failed");
+            return;
+        }
+
+        var status = ReadLuaStatus(statusPath);
+        var luaGateReady = status.exists
+            && status.passwordConfigured
+            && status.ready
+            && IsLuaStatusFresh(status.updatedAt, LuaStatusFreshWindow);
+
         var conn = _state.Connection;
         if (conn is not null)
         {
@@ -136,6 +153,8 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         }
         if (conn is null)
         {
+            if (luaGateReady) return;
+
             // Grace window since we last had a connection (or since
             // SolarpunkServer process startup if we've never had one).
             var sinceConnLost = DateTimeOffset.UtcNow - _noConnSince;
@@ -146,13 +165,17 @@ public sealed class HeartbeatWatchdogService : BackgroundService
             if (noConnSinceWarn > TimeSpan.FromSeconds(15))
             {
                 _log.LogCritical(
-                    "FAIL-CLOSED: SolarpunkAuthPassword is configured but SolarpunkPlugin.dll has NEVER connected to SolarpunkServer's IPC " +
-                    "pipe past {Grace}s grace. UE4SS / SolarpunkLoader / SolarpunkPlugin.dll likely did not load. Without the plugin and " +
-                    "the Lua gate, the passworded server cannot enforce its password. Stopping Solarpunk (path-scoped only — " +
-                    "panel-managed deploys with empty GameInstallRoot will see this log but require panel-side recovery, " +
-                    "PluginPid path is unavailable without a connection). " +
-                    "Diagnose: check sp-stdout.log for UE4SS bootstrap, SolarpunkAuth.log absent, SolarpunkServerRuntime.log absent.",
-                    NoConnectionFailClosedGrace.TotalSeconds);
+                    "FAIL-CLOSED: SolarpunkAuthPassword is configured but SolarpunkAuth.lua is not publishing a fresh ready status " +
+                    "past {Grace}s grace (exists={Exists} ready={Ready} passwordConfigured={PwConfigured} reason='{Reason}' updated={Updated} path={Path}). " +
+                    "Stopping Solarpunk to prevent the passworded server from running open without the Lua password gate. " +
+                    "Diagnose: check UE4SS.log for SolarpunkServerRuntime/SolarpunkAuth load failures.",
+                    NoConnectionFailClosedGrace.TotalSeconds,
+                    status.exists,
+                    status.ready,
+                    status.passwordConfigured,
+                    status.reason,
+                    status.updatedAt?.ToUnixTimeSeconds(),
+                    statusPath);
                 _lastLuaFailClosedWarnAt = noConnNow;
             }
             try
@@ -168,27 +191,6 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         var sinceConnect = DateTimeOffset.UtcNow - conn.ConnectedAt;
         if (sinceConnect < LuaStatusBootstrapGrace) return;
 
-        // Status file lives next to appsettings.json, which sits in
-        // SolarpunkServer's working dir. We can derive it from the
-        // running process. On panel deploys the panel starts
-        // SolarpunkServer.exe with `-WorkingDirectory $solarpunkDir` so the
-        // exe directory IS the appsettings directory. On standalone
-        // self-hosts the assumption may not hold; ContentRootPath
-        // would be more correct in the future, but adding a host
-        // dependency here is more risk than it's worth right now.
-        string statusPath;
-        try
-        {
-            var baseDir = AppContext.BaseDirectory;
-            statusPath = Path.Combine(baseDir, ".solarpunk-auth-status");
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "SolarpunkAuth status path resolve failed");
-            return;
-        }
-
-        var (ready, passwordConfigured, reason, exists) = ReadLuaStatus(statusPath);
         // Stale-file protection: SolarpunkServerRuntime/main.lua atomically
         // overwrites .solarpunk-auth-status with ready=0,reason=runtime_init
         // BEFORE SolarpunkAuth runs, on every game process start (see the
@@ -199,10 +201,9 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         // handshake happens, and the no-connection fail-closed path in
         // CheckSolarpunkAuthLuaReady (above) takes the game down via pid-file.
         // So any .solarpunk-auth-status the watchdog reads here with
-        // ready=1 + passwordConfigured=1 was written by THIS game
-        // process's SolarpunkAuth.lua post-handshake; no file mtime
-        // freshness check needed.
-        if (exists && passwordConfigured && ready) return;
+        // ready=1 + passwordConfigured=1 with a fresh updated timestamp was
+        // written by this game process's SolarpunkAuth.lua heartbeat.
+        if (luaGateReady) return;
 
         var now = DateTimeOffset.UtcNow;
         var sinceWarn = now - _lastLuaFailClosedWarnAt;
@@ -210,11 +211,11 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         {
             _log.LogCritical(
                 "FAIL-CLOSED: SolarpunkAuthPassword is configured but SolarpunkAuth.lua status is not ready " +
-                "(exists={Exists} ready={Ready} passwordConfigured={PwConfigured} reason='{Reason}' path={Path}). " +
+                "(exists={Exists} ready={Ready} passwordConfigured={PwConfigured} reason='{Reason}' updated={Updated} path={Path}). " +
                 "Stopping Solarpunk to prevent the passworded server from running open without the Lua password gate. " +
                 "Investigate UE4SS load failure / SolarpunkAuth.lua install / mods.txt ordering; the supervisor will " +
                 "relaunch the game on the next loop.",
-                exists, ready, passwordConfigured, reason, statusPath);
+                status.exists, status.ready, status.passwordConfigured, status.reason, status.updatedAt?.ToUnixTimeSeconds(), statusPath);
             _lastLuaFailClosedWarnAt = now;
         }
 
@@ -235,18 +236,19 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         }
     }
 
-    private (bool ready, bool passwordConfigured, string reason, bool exists) ReadLuaStatus(string path)
+    private (bool ready, bool passwordConfigured, string reason, bool exists, DateTimeOffset? updatedAt) ReadLuaStatus(string path)
     {
         try
         {
             if (!File.Exists(path))
             {
-                return (false, false, "file_missing", false);
+                return (false, false, "file_missing", false, null);
             }
             var lines = File.ReadAllLines(path);
             bool ready = false;
             bool passwordConfigured = false;
             string reason = "";
+            DateTimeOffset? updatedAt = null;
             foreach (var line in lines)
             {
                 var eq = line.IndexOf('=');
@@ -258,15 +260,29 @@ public sealed class HeartbeatWatchdogService : BackgroundService
                     case "ready": ready = value == "1"; break;
                     case "passwordConfigured": passwordConfigured = value == "1"; break;
                     case "reason": reason = value; break;
+                    case "updated":
+                        if (long.TryParse(value, out var unixSeconds))
+                        {
+                            try { updatedAt = DateTimeOffset.FromUnixTimeSeconds(unixSeconds); }
+                            catch { updatedAt = null; }
+                        }
+                        break;
                 }
             }
-            return (ready, passwordConfigured, reason, true);
+            return (ready, passwordConfigured, reason, true, updatedAt);
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "SolarpunkAuth status read failed: {Path}", path);
-            return (false, false, "read_error", false);
+            return (false, false, "read_error", false, null);
         }
+    }
+
+    private static bool IsLuaStatusFresh(DateTimeOffset? updatedAt, TimeSpan maxAge)
+    {
+        if (updatedAt is null) return false;
+        var age = DateTimeOffset.UtcNow - updatedAt.Value;
+        return age >= TimeSpan.Zero && age <= maxAge;
     }
 
     private static readonly string[] SpKillProcessNameWhitelist = new[]

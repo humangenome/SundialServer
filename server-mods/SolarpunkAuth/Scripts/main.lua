@@ -387,14 +387,19 @@ local function kick_once(pc, reason)
     return ok_any
 end
 
--- Grace before kicking a not-yet-valid client. The launcher (with the client
--- plugin) makes ?Name=<char>__SPPW__<pw> stick AT JOIN, so the token is present
--- on the very first evaluate and the client is admitted immediately. The grace
--- only matters when the name lands slightly after the connection forms (engine
--- name propagation / a post-join ServerChangeName), so a legitimate client is
--- never kicked on a transient empty/placeholder name. An unauthorized client
--- that never presents the token is kicked once the grace elapses.
-local GRACE_SECONDS = 4
+-- Grace before kicking a not-yet-valid client. Solarpunk can overwrite the
+-- join URL name during world travel, then the client mod reasserts the
+-- launcher-provided name shortly after. That reassertion CANNOT happen until
+-- the client's world load completes (PlayerState only replicates to the owning
+-- client after load), so a legit launcher client on a slow rig presents a
+-- transient PC-*/TESTING-UID identity for the whole load — measured ~52s on a
+-- real customer machine. v0.1.64 kicked not-yet-recovered
+-- identities at 15s, which kick-looped every client whose world load exceeds
+-- 15s; the invalid-identity window must stay long enough for the slowest
+-- realistic load. Direct/old-client joins that never recover still get kicked
+-- when this window expires (pre-v0.1.64 behavior).
+local PASSWORD_GRACE_SECONDS = 15
+local IDENTITY_GRACE_SECONDS = 120
 
 -- Per-controller verdicts. Each controller is decided EXACTLY ONCE; we never
 -- re-touch a kicked PC (re-kicking the dying object crashes UE4SS). The
@@ -403,6 +408,8 @@ local GRACE_SECONDS = 4
 local kicked = SP.kicked   -- [addr] = true (denied + kicked once; leave alone)
 local verified = {}        -- [addr] = true (allow, already checked OK)
 local first_seen = {}      -- [addr] = os.time() first observed without a valid token
+SP.auth_verified = verified
+SP.auth_password_required = (CONFIGURED_PASSWORD ~= "")
 
 local function evaluate(pc)
     if not pc or not pc:IsValid() then return end
@@ -417,21 +424,6 @@ local function evaluate(pc)
     -- half-loaded object (UE4SS-on-5.7 AV class). Verdicts that ALLOW are
     -- fine any time; verdicts that KICK wait until the transition settles.
     local can_kick = SP.settled(k)
-    if SP.invalid_identity and SP.invalid_identity[k] then
-        if not can_kick then
-            if not first_seen[k] then first_seen[k] = os.time() end
-            return
-        end
-        local detail = SP.invalid_identity[k]
-        kicked[k] = true
-        first_seen[k] = nil
-        log("auth DENY (invalid client identity) name='" .. tostring(raw) ..
-            "' key='" .. tostring(detail.key or "") ..
-            "' sid='" .. tostring(detail.sid or "") ..
-            "' [" .. tostring(k) .. "] -- kicking (update Sundial)")
-        kick_once(pc, IDENTITY_KICK_REASON)
-        return
-    end
     -- Ban gate first: a banned synthetic id is rejected regardless of password.
     if auth_character ~= "" and next(BANNED) ~= nil and BANNED[synth_id(auth_character)] then
         if not can_kick then
@@ -444,11 +436,56 @@ local function evaluate(pc)
         kick_once(pc)
         return
     end
+    -- If a valid token appears after Solarpunk temporarily overwrote the
+    -- player name, accept it and leave SP.invalid_identity in place for
+    -- SolarpunkHost to reissue BeginLoadData with the corrected synthetic id.
+    if CONFIGURED_PASSWORD ~= "" and raw ~= "" and token == CONFIGURED_PASSWORD then
+        if auth_character ~= "" then SP.canonical_name[k] = auth_character end
+        verified[k] = true
+        first_seen[k] = nil
+        if SP.invalid_identity and SP.invalid_identity[k] then
+            SP.invalid_identity[k].auth_recovered = true
+            SP.invalid_identity[k].auth_recovered_at = os.time()
+            log("auth OK for '" .. raw:gsub(AUTH_DELIM .. ".*", AUTH_DELIM .. "<redacted>") ..
+                "' [" .. tostring(k) .. "] -- pending identity recovery")
+        else
+            log("auth OK for '" .. raw:gsub(AUTH_DELIM .. ".*", AUTH_DELIM .. "<redacted>") .. "' [" .. tostring(k) .. "]")
+        end
+        return
+    end
+    if SP.invalid_identity and SP.invalid_identity[k] then
+        local detail = SP.invalid_identity[k]
+        if CONFIGURED_PASSWORD == "" and detail.identity_recovered == true then
+            local recovered_name = tostring(detail.recovered_name or "")
+            if recovered_name ~= "" then SP.canonical_name[k] = recovered_name end
+            verified[k] = true
+            first_seen[k] = nil
+            SP.invalid_identity[k] = nil
+            log("auth OK recovered identity [" .. tostring(k) ..
+                "] sid='" .. tostring(detail.recovered_sid or "") ..
+                "' name='" .. recovered_name .. "'")
+            return
+        end
+        if not first_seen[k] then first_seen[k] = os.time() end
+        if os.time() - first_seen[k] < IDENTITY_GRACE_SECONDS then return end
+        if not can_kick then
+            return
+        end
+        kicked[k] = true
+        first_seen[k] = nil
+        log("auth DENY (invalid client identity) name='" .. tostring(raw) ..
+            "' key='" .. tostring(detail.key or "") ..
+            "' sid='" .. tostring(detail.sid or "") ..
+            "' auth_recovered=" .. tostring(detail.auth_recovered == true) ..
+            "' [" .. tostring(k) .. "] -- kicking (update Sundial)")
+        kick_once(pc, IDENTITY_KICK_REASON)
+        return
+    end
     -- Password gate: an empty CONFIGURED_PASSWORD means the server is open, so
     -- only the ban gate above applies; otherwise require the matching token.
     if CONFIGURED_PASSWORD == "" and is_transient_identity_name(character) then
         if not first_seen[k] then first_seen[k] = os.time(); return end
-        if os.time() - first_seen[k] < GRACE_SECONDS then return end
+        if os.time() - first_seen[k] < IDENTITY_GRACE_SECONDS then return end
         if not can_kick then return end
         kicked[k] = true
         first_seen[k] = nil
@@ -457,16 +494,23 @@ local function evaluate(pc)
         kick_once(pc, IDENTITY_KICK_REASON)
         return
     end
-    if CONFIGURED_PASSWORD == "" or (raw ~= "" and token == CONFIGURED_PASSWORD) then
+    if CONFIGURED_PASSWORD == "" then
         if auth_character ~= "" then SP.canonical_name[k] = auth_character end
         verified[k] = true
         first_seen[k] = nil
         log("auth OK for '" .. raw:gsub(AUTH_DELIM .. ".*", AUTH_DELIM .. "<redacted>") .. "' [" .. tostring(k) .. "]")
         return
     end
-    -- not valid yet: start/continue the grace window
+    -- not valid yet: start/continue the grace window. A join with NO token at
+    -- all may be a launcher client whose name channel hasn't delivered yet —
+    -- the client cannot re-assert ?Name= until its world load completes
+    -- (~52s measured), and machine-alias identity recovery now
+    -- clears the invalid-identity record long before that, dropping the
+    -- controller into this branch. Only a token that is PRESENT and WRONG is a
+    -- genuine bad password worth the fast kick.
     if not first_seen[k] then first_seen[k] = os.time(); return end
-    if os.time() - first_seen[k] < GRACE_SECONDS then return end   -- still in grace
+    local grace = (token == "") and IDENTITY_GRACE_SECONDS or PASSWORD_GRACE_SECONDS
+    if os.time() - first_seen[k] < grace then return end   -- still in grace
     if not can_kick then return end                     -- wait for the transition to settle
     kicked[k] = true                                    -- mark BEFORE kicking: never kick twice
     first_seen[k] = nil
@@ -521,3 +565,7 @@ end)
 
 log("auth gate active (1s game-thread sweep, name-channel)")
 write_status(true, true, "gate_active")
+
+SP.every("auth-status-heartbeat", 30000, 5000, function()
+    write_status(true, CONFIGURED_PASSWORD ~= "", CONFIGURED_PASSWORD == "" and "no_password_configured" or "gate_active")
+end)

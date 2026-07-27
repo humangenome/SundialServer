@@ -353,14 +353,105 @@ local function param_string(p)
     return nil
 end
 
+local materialized_slot_log = {}
+local function is_generated_world_slot(name)
+    name = tostring(name or "")
+    return #name == 32 and name:match("^[0-9A-Fa-f]+$") ~= nil
+end
+
+local function materialize_generated_world_slot(slot_name, reason)
+    if not SAVE_GAMES_DIR or not is_generated_world_slot(slot_name) then return false end
+    if slot_name == WORLD_NAME then return false end
+    local src = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
+    local dst = SAVE_GAMES_DIR .. "\\" .. slot_name .. ".sav"
+    if file_exists(dst) or not file_exists(src) then return false end
+    local data = read_all(src)
+    if not data or #data == 0 then return false end
+    local tmp = dst .. ".tmp"
+    local f = io.open(tmp, "wb")
+    if not f then return false end
+    f:write(data)
+    f:close()
+    local ok = os.rename(tmp, dst)
+    if not ok then os.remove(tmp) end
+    local key = tostring(slot_name) .. ":" .. tostring(ok)
+    if not materialized_slot_log[key] then
+        materialized_slot_log[key] = true
+        log("world slot materialized " .. WORLD_NAME .. ".sav -> " .. tostring(slot_name) ..
+            ".sav reason=" .. tostring(reason or "") ..
+            " ok=" .. tostring(ok) ..
+            " bytes=" .. tostring(#data))
+    end
+    return ok
+end
+
 local function rewrite_world_slot_param(p, label)
     local before = param_string(p)
     if not before or before == "" or before == WORLD_NAME then return end
     if before == "Options" or before == "gp_data" then return end
+    local materialized = materialize_generated_world_slot(before, "slot-rewrite-" .. tostring(label or ""))
     enforce_world_slot_runtime("slot-rewrite-" .. tostring(label or ""))
     local ok = pcall(function() p:set(WORLD_NAME) end)
     log("slot rewrite " .. label .. ": " .. tostring(before) .. " -> " .. WORLD_NAME ..
-        " ok=" .. tostring(ok) .. " after=" .. tostring(param_string(p)))
+        " ok=" .. tostring(ok) ..
+        " materialized=" .. tostring(materialized) ..
+        " after=" .. tostring(param_string(p)))
+end
+
+-- v1.05+ save-flow (game build 24038177). The "savefix" builds
+-- changed slot semantics: HostGame probes DoesSaveGameExist with a fresh random
+-- 32-hex GUID as the RESUME slot (loads it only if it exists), then probes more
+-- GUIDs hunting a FREE slot for the session's working save. The old blanket
+-- rewrite forced every probe to "exists", which turned the free-slot hunt into
+-- a hundreds-deep probe storm and ended in a fatal failed world load + crash
+-- loop on every restart that had an existing world save. For GUID-shaped slots:
+-- materialize the configured world into the FIRST probed GUID (so the resume
+-- check finds it and the game loads it natively) and leave every param
+-- untouched. Old builds probe ULID-shaped slots and keep the rewrite path.
+local guid_probe_seeded = false
+local function handle_world_slot_param(p, label, mode)
+    local before = param_string(p)
+    if not before or before == "" or before == WORLD_NAME then return end
+    if before == "Options" or before == "gp_data" then return end
+    if is_generated_world_slot(before) then
+        if mode == "probe" then
+            if not guid_probe_seeded and
+                materialize_generated_world_slot(before, "probe-seed-" .. tostring(label or "")) then
+                guid_probe_seeded = true
+            end
+        elseif mode == "load" then
+            materialize_generated_world_slot(before, "load-seed-" .. tostring(label or ""))
+        end
+        -- mode == "save": the game writing its own session slot — always native.
+        return
+    end
+    rewrite_world_slot_param(p, label)
+end
+
+-- THE world-load fix. BPC_SaveManager_C:LoadWorldSaveGame(SlotName) is
+-- the world loader; on the headless host the game passes a fresh random per-boot
+-- GUID slot that has never been written. UE4SS logs the rewritten param, but
+-- Solarpunk's native extended-save path can still read the original slot, so
+-- materialize that generated filename from the configured world save before the
+-- read happens. Fresh servers have no configured save yet, so the first load can
+-- still miss and create a new world.
+local sm_hooks_installed = false
+local function try_install_savemgr_hooks()
+    if sm_hooks_installed then return end
+    local base = "/Game/Code/SaveSystem/Framework/BPC_SaveManager.BPC_SaveManager_C"
+    local any = false
+    local function hook_rewrite(fn)
+        local ok = pcall(function()
+            RegisterHook(base .. ":" .. fn, function(self, slot_name)
+                handle_world_slot_param(slot_name, "sm:" .. fn, "load")
+            end, function() end)
+        end)
+        log("smhook " .. fn .. " ok=" .. tostring(ok))
+        if ok then any = true end
+    end
+    hook_rewrite("LoadWorldSaveGame")
+    hook_rewrite("LoadWorldSaveGameHeader")
+    if any then sm_hooks_installed = true end
 end
 
 local mirror_log = {}
@@ -459,10 +550,17 @@ end
 
 local function normalize_save_games_dir(reason)
     local mirrored = mirror_active_world_save(reason)
-    -- Leave engine-generated world slot files in place. The game can continue
-    -- probing that original slot after we mirror it to World1.sav; moving it
-    -- causes missing-save reads during joins.
+    -- Mid-session: leave engine-generated world slot files in place. The game
+    -- can continue probing its original slot after we mirror it to World1.sav;
+    -- moving it causes missing-save reads during joins.
+    -- Pre-host (before HostGame): archive them. The mirror above has already
+    -- captured the newest into <WORLD_NAME>.sav, each boot re-seeds the resume
+    -- slot from it, and stale generated copies otherwise accumulate without
+    -- bound (older builds left hundreds behind).
     local archived = 0
+    if tostring(reason or "") == "pre-host" then
+        archived = archive_orphaned_world_saves(reason)
+    end
     if mirrored or archived > 0 or tostring(reason or "") ~= "sweep" then
         log("save dir normalized reason=" .. tostring(reason or "") ..
             " mirrored=" .. tostring(mirrored) ..
@@ -489,6 +587,8 @@ local loaded_sid = {}  -- [controller addr] = last synthetic id observed for the
 local load_reissued_sid = {}
 local first_seen_at = {}
 SP.invalid_identity = SP.invalid_identity or {}
+SP.machine_canonical_name = SP.machine_canonical_name or {}
+local MACHINE_ALIAS_FILE = SP_DIR and (SP_DIR .. "\\data\\machine_aliases.tsv") or nil
 
 local function crc32(s)
     local c = 0xFFFFFFFF
@@ -540,6 +640,67 @@ local function is_transient_identity_name(nm)
     return suffix ~= nil and #suffix >= 8
 end
 local transient_log = {}
+local transient_name_by_controller = {}
+local machine_alias_log = {}
+local machine_alias_dirty = false
+local function machine_alias_field(s)
+    return tostring(s or ""):gsub("[\r\n\t]", ""):sub(1, 80)
+end
+local function persist_machine_aliases()
+    if not MACHINE_ALIAS_FILE or not machine_alias_dirty then return end
+    machine_alias_dirty = false
+    os.execute('mkdir "' .. SP_DIR .. '\\data" >NUL 2>NUL')
+    local tmp = MACHINE_ALIAS_FILE .. ".tmp"
+    local f = io.open(tmp, "wb")
+    if not f then return end
+    for machine_name, canonical_name in pairs(SP.machine_canonical_name) do
+        machine_name = machine_alias_field(machine_name)
+        canonical_name = machine_alias_field(canonical_name)
+        if machine_name ~= "" and canonical_name ~= "" and
+            is_transient_identity_name(machine_name) and not is_transient_identity_name(canonical_name) then
+            f:write(machine_name .. "\t" .. canonical_name .. "\n")
+        end
+    end
+    f:close()
+    os.remove(MACHINE_ALIAS_FILE)
+    pcall(function() os.rename(tmp, MACHINE_ALIAS_FILE) end)
+end
+local function remember_machine_alias(machine_name, canonical_name, k, why)
+    machine_name = machine_alias_field(machine_name)
+    canonical_name = machine_alias_field(canonical_name)
+    if machine_name == "" or canonical_name == "" then return end
+    if not is_transient_identity_name(machine_name) or is_transient_identity_name(canonical_name) then return end
+    if SP.machine_canonical_name[machine_name] ~= canonical_name then
+        SP.machine_canonical_name[machine_name] = canonical_name
+        machine_alias_dirty = true
+        persist_machine_aliases()
+        local key = tostring(machine_name) .. ">" .. tostring(canonical_name)
+        if not machine_alias_log[key] then
+            machine_alias_log[key] = true
+            log("save identity machine alias [" .. tostring(k or "") .. "] " ..
+                machine_name .. " -> " .. canonical_name .. " why=" .. tostring(why or ""))
+        end
+    end
+end
+SP.remember_machine_alias = remember_machine_alias
+local function load_machine_aliases()
+    if not MACHINE_ALIAS_FILE then return end
+    local body = read_all(MACHINE_ALIAS_FILE)
+    if not body then return end
+    local loaded = 0
+    for line in body:gmatch("[^\r\n]+") do
+        local machine_name, canonical_name = line:match("^([^\t]+)\t(.+)$")
+        machine_name = machine_alias_field(machine_name)
+        canonical_name = machine_alias_field(canonical_name)
+        if machine_name ~= "" and canonical_name ~= "" and
+            is_transient_identity_name(machine_name) and not is_transient_identity_name(canonical_name) then
+            SP.machine_canonical_name[machine_name] = canonical_name
+            loaded = loaded + 1
+        end
+    end
+    log("save identity machine aliases loaded count=" .. tostring(loaded))
+end
+load_machine_aliases()
 local function stable_pname(c, k)
     local raw = pname(c)
     local nm = raw
@@ -547,13 +708,27 @@ local function stable_pname(c, k)
         nm = SP.canonical_name[k]
     end
     if nm == "" then return nil end
+    if raw ~= "" and raw ~= nm then
+        remember_machine_alias(raw, nm, k, "canonical-name")
+    end
     if is_transient_identity_name(nm) then
+        local alias = SP.machine_canonical_name and SP.machine_canonical_name[nm]
+        if alias and alias ~= "" and not is_transient_identity_name(alias) then
+            if SP.canonical_name then SP.canonical_name[k] = alias end
+            remember_machine_alias(nm, alias, k, "transient-alias-hit")
+            return alias
+        end
+        transient_name_by_controller[k] = nm
         local key = tostring(k) .. ":" .. tostring(nm)
         if not transient_log[key] then
             transient_log[key] = true
             log("save identity pending [" .. tostring(k) .. "] transient name=" .. tostring(nm))
         end
         return nil
+    end
+    local prior = transient_name_by_controller[k]
+    if prior and prior ~= "" then
+        remember_machine_alias(prior, nm, k, "transient-recovered")
     end
     return nm
 end
@@ -1299,6 +1474,34 @@ local function stamp_playerdata_record(c, sid, why)
     end
     return did
 end
+-- Stuck-items fix: a raw UE4SS reflection write to a replicated RepNotify
+-- property (BC_InventorySystem.InventoryID, a GUID) sets the server value but never
+-- marks it net-dirty, so the client keeps the blank id it received at join and the
+-- starter items stay bound to a null owner (locked in the hotbar). After we change
+-- such an id server-side, flush dormancy + force a net update on the owning actors so
+-- the new InventoryID/UniquePlayerID actually replicates and the client RepNotify
+-- re-binds the inventory. FlushNetDormancy/ForceNetUpdate are stock BlueprintCallable
+-- AActor methods; all calls are pcall-guarded so a missing method is a harmless no-op.
+local net_push_log = {}
+local function push_net_update(c, why)
+    local function push(obj)
+        if not validish(obj) then return end
+        pcall(function() obj:FlushNetDormancy() end)
+        pcall(function() obj:ForceNetUpdate() end)
+    end
+    push(c)
+    push(pawn_of(c))
+    pcall(function()
+        local ps = c.PlayerState
+        if ps and ps:IsValid() then push(ps) end
+    end)
+    local key = tostring(akey(c)) .. ":" .. tostring(why or "")
+    if not net_push_log[key] then
+        net_push_log[key] = true
+        log("net push force-replicate ids [" .. tostring(akey(c)) .. "] why=" .. tostring(why or ""))
+    end
+end
+
 local function stamp_inventory_ids(c, sid, why)
     local inv_id = stable_inventory_id(sid)
     local out = { seen = {}, items = {} }
@@ -1331,6 +1534,7 @@ local function stamp_inventory_ids(c, sid, why)
             return lower:find("id", 1, true) ~= nil or lower:find("uid", 1, true) ~= nil
         end, inv_id, label, true) or did
     end
+    if did then push_net_update(c, "inv:" .. tostring(why or "")) end
     return did
 end
 local function stamp_persistence_ids(c, sid, why)
@@ -1421,21 +1625,25 @@ stamp_unique_player_id = function(c, sid, why)
 end
 
 local invalid_begin_load_log = {}
-local function reject_remote_identity(c, k, key, sid, reason)
+local function reject_remote_identity(c, k, key, sid, reason, keep_loaded)
     pending[k] = nil
-    loaded_sid[k] = nil
+    if not keep_loaded then loaded_sid[k] = nil end
     if SP.invalid_identity then
+        local existing = SP.invalid_identity[k] or {}
         SP.invalid_identity[k] = {
             key = tostring(key or ""),
             sid = sid,
             name = pname(c),
             at = os.time(),
             reason = tostring(reason or ""),
+            auth_recovered = existing.auth_recovered == true,
+            auth_recovered_at = existing.auth_recovered_at,
+            identity_recovered = existing.identity_recovered == true,
+            recovered_sid = existing.recovered_sid,
+            recovered_name = existing.recovered_name,
+            recovered_at = existing.recovered_at,
         }
     end
-    -- Put any unavoidable original save under the host quarantine identity
-    -- instead of letting the game persist another blank/customer-corrupting key.
-    stamp_unique_player_id(c, HOST_SYNTH_ID, "invalid-identity-" .. tostring(reason or ""))
     local log_key = tostring(k) .. ":" .. tostring(key or "") .. ":" .. tostring(reason or "")
     if not invalid_begin_load_log[log_key] then
         invalid_begin_load_log[log_key] = true
@@ -1444,20 +1652,45 @@ local function reject_remote_identity(c, k, key, sid, reason)
             " name=" .. tostring(pname(c)) ..
             " sid=" .. tostring(sid or "") ..
             " reason=" .. tostring(reason or "") ..
-            " -- quarantined pending auth kick")
+            " -- blocked pending identity recovery/auth kick")
     end
+end
+
+local function mark_invalid_identity_recovered(k, sid, name_label)
+    if not (SP.invalid_identity and SP.invalid_identity[k]) then return end
+    local detail = SP.invalid_identity[k]
+    detail.identity_recovered = true
+    detail.recovered_sid = sid
+    detail.recovered_name = name_label
+    detail.recovered_at = os.time()
+end
+
+local function clear_invalid_identity_if_auth_recovered(k)
+    local detail = SP.invalid_identity and SP.invalid_identity[k] or nil
+    if detail and detail.auth_recovered == true then
+        SP.invalid_identity[k] = nil
+        return true
+    end
+    return false
+end
+
+local function invalid_identity_recovered_sid(k)
+    local detail = SP.invalid_identity and SP.invalid_identity[k] or nil
+    if detail and detail.identity_recovered == true and isSynth(detail.recovered_sid) then
+        return detail.recovered_sid, detail.recovered_name
+    end
+    return nil, nil
 end
 
 local quarantined_save_log = {}
 local function quarantine_unowned_save(c, k, why)
     if not (c and c:IsValid()) then return end
-    local did = stamp_unique_player_id(c, HOST_SYNTH_ID, tostring(why or ""))
     local log_key = tostring(k) .. ":" .. tostring(why or "")
     if not quarantined_save_log[log_key] then
         quarantined_save_log[log_key] = true
         log("save identity quarantined [" .. tostring(k) .. "] sid=" ..
             HOST_SYNTH_ID .. " why=" .. tostring(why or "") ..
-            " changed=" .. tostring(did))
+            " controller_changed=false")
     end
 end
 
@@ -1493,7 +1726,7 @@ local function mark_controller_seen(k)
     return first_seen_at[k]
 end
 
-local MAX_BEGIN_LOAD_RECOVERY_AGE = 3
+local MAX_BEGIN_LOAD_RECOVERY_AGE = 120
 local function begin_load_age(k)
     return os.time() - (first_seen_at[k] or os.time())
 end
@@ -1562,8 +1795,44 @@ local function drive_pending_begin_load(c, k)
         " err=" .. tostring(err))
 end
 
+local invalid_recovery_log = {}
+local function try_recover_invalid_identity(c, k)
+    local detail = SP.invalid_identity and SP.invalid_identity[k]
+    if not detail then return false end
+    if pending[k] then
+        clear_invalid_identity_if_auth_recovered(k)
+        return true
+    end
+    if detail.identity_recovered == true and isSynth(detail.recovered_sid) and recovered_load_already(k, detail.recovered_sid) then
+        clear_invalid_identity_if_auth_recovered(k)
+        return true
+    end
+    local sid, name_label = load_sid_for_controller(c, k)
+    if not sid then return false end
+    local reason = "invalid-identity-name-recovered"
+    if not schedule_begin_load_recovery(c, k, detail.key or "", sid, name_label, reason) then
+        return false
+    end
+    mark_invalid_identity_recovered(k, sid, name_label)
+    remember_machine_alias(detail.name or "", name_label or "", k, "invalid-identity-recovery")
+    clear_invalid_identity_if_auth_recovered(k)
+    stamp_unique_player_id(c, sid, reason)
+    local log_key = tostring(k) .. ":" .. tostring(sid)
+    if not invalid_recovery_log[log_key] then
+        invalid_recovery_log[log_key] = true
+        log("BeginLoadData invalid identity recovered [" .. tostring(k) ..
+            "] prior_key=" .. tostring(detail.key or "") ..
+            " sid=" .. tostring(sid) ..
+            " name=" .. tostring(name_label or "") ..
+            " prior_name=" .. tostring(detail.name or "") ..
+            " prior_reason=" .. tostring(detail.reason or ""))
+    end
+    return true
+end
+
 local function controller_blocked(k)
-    return SP.kicked[k] or (SP.invalid_identity and SP.invalid_identity[k])
+    local detail = SP.invalid_identity and SP.invalid_identity[k] or nil
+    return SP.kicked[k] or (detail and detail.identity_recovered ~= true)
 end
 
 local function tick()
@@ -1577,6 +1846,9 @@ local function tick()
             mark_controller_seen(k)
             -- never touch a controller auth already kicked (dying object) or
             -- quarantined for a bad client identity.
+            if not c:IsLocalPlayerController() then
+                try_recover_invalid_identity(c, k)
+            end
             if not c:IsLocalPlayerController() and not controller_blocked(k) then
                 local sid, name_label = load_sid_for_controller(c, k)
                 if sid then
@@ -1591,6 +1863,7 @@ local function tick()
             loaded_sid[k] = nil
             load_reissued_sid[k] = nil
             if SP.canonical_name then SP.canonical_name[k] = nil end
+            transient_name_by_controller[k] = nil
         end
     end
     for k in pairs(first_seen_at) do
@@ -1598,6 +1871,7 @@ local function tick()
             first_seen_at[k] = nil
             load_reissued_sid[k] = nil
             if SP.invalid_identity then SP.invalid_identity[k] = nil end
+            transient_name_by_controller[k] = nil
         end
     end
     for k in pairs(pending) do
@@ -1634,11 +1908,17 @@ local function try_install_bld_hook()
                 local sid, name_label = load_sid_for_controller(c, k)
                 if is_blank_id(key) then
                     if recovered_load_already(k, sid) then
-                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        reject_remote_identity(c, k, key, sid, "blank-load-key", true)
+                        mark_invalid_identity_recovered(k, sid, name_label)
+                        clear_invalid_identity_if_auth_recovered(k)
                         stamp_unique_player_id(c, sid, "begin-load-recover-blank-key-duplicate")
-                    elseif sid and schedule_begin_load_recovery(c, k, key, sid, name_label, "blank-load-key") then
-                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
-                        stamp_unique_player_id(c, sid, "begin-load-recover-blank-key")
+                    elseif sid then
+                        reject_remote_identity(c, k, key, sid, "blank-load-key", true)
+                        if schedule_begin_load_recovery(c, k, key, sid, name_label, "blank-load-key") then
+                            mark_invalid_identity_recovered(k, sid, name_label)
+                            clear_invalid_identity_if_auth_recovered(k)
+                            stamp_unique_player_id(c, sid, "begin-load-recover-blank-key")
+                        end
                     else
                         reject_remote_identity(c, k, key, sid, "blank-load-key")
                     end
@@ -1655,11 +1935,17 @@ local function try_install_bld_hook()
                     stamp_unique_player_id(c, key, "begin-load-valid")
                 else
                     if recovered_load_already(k, sid) then
-                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key", true)
+                        mark_invalid_identity_recovered(k, sid, name_label)
+                        clear_invalid_identity_if_auth_recovered(k)
                         stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key-duplicate")
-                    elseif sid and schedule_begin_load_recovery(c, k, key, sid, name_label, "non-synthetic-load-key") then
-                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
-                        stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key")
+                    elseif sid then
+                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key", true)
+                        if schedule_begin_load_recovery(c, k, key, sid, name_label, "non-synthetic-load-key") then
+                            mark_invalid_identity_recovered(k, sid, name_label)
+                            clear_invalid_identity_if_auth_recovered(k)
+                            stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key")
+                        end
                     else
                         reject_remote_identity(c, k, key, sid, "non-synthetic-load-key")
                     end
@@ -1737,6 +2023,12 @@ local function try_install_save_player_hook()
                 local k = akey(c)
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
+                    local recovered_sid = invalid_identity_recovered_sid(k)
+                    if recovered_sid then
+                        stamp_persistence_ids(c, recovered_sid, "pre-save-recovered-invalid-identity")
+                        stamp_playerdata_param(playerdata, recovered_sid, "pre-save-recovered-invalid-identity")
+                        return
+                    end
                     quarantine_unowned_save(c, k, "pre-save-invalid-identity")
                     stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-invalid-identity")
                     return
@@ -1783,6 +2075,12 @@ local function try_install_apply_inventory_hook()
                 local k = akey(c)
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
+                    local recovered_sid = invalid_identity_recovered_sid(k)
+                    if recovered_sid then
+                        stamp_persistence_ids(c, recovered_sid, "pre-inventory-recovered-invalid-identity")
+                        stamp_inventory_param(inventory, recovered_sid, "pre-inventory-recovered-invalid-identity")
+                        return
+                    end
                     quarantine_unowned_save(c, k, "pre-inventory-invalid-identity")
                     stamp_inventory_param(inventory, HOST_SYNTH_ID, "pre-inventory-invalid-identity")
                     return
@@ -1829,13 +2127,13 @@ local function try_install_save_slot_hooks()
         if ok then any = true end
     end
     hook("/Script/Engine.GameplayStatics:DoesSaveGameExist", function(_, slot_name)
-        rewrite_world_slot_param(slot_name, "DoesSaveGameExist")
+        handle_world_slot_param(slot_name, "DoesSaveGameExist", "probe")
     end)
     hook("/Script/Engine.GameplayStatics:LoadGameFromSlot", function(_, slot_name)
-        rewrite_world_slot_param(slot_name, "LoadGameFromSlot")
+        handle_world_slot_param(slot_name, "LoadGameFromSlot", "load")
     end)
     hook("/Script/Engine.GameplayStatics:SaveGameToSlot", function(_, save_obj, slot_name)
-        rewrite_world_slot_param(slot_name, "SaveGameToSlot")
+        handle_world_slot_param(slot_name, "SaveGameToSlot", "save")
     end)
     if any then
         save_hooked = true
@@ -1865,6 +2163,7 @@ SP.every("host-boot", 1000, 0, function()
     log_saveish_string_props(gi, "GameInstance.after")
     enforce_world_slot_runtime("pre-host")
     try_install_save_slot_hooks()
+    try_install_savemgr_hooks()        -- install BEFORE HostGame so the boot world-load slot is rewritten to World1
     try_install_bld_hook()
     try_install_save_player_hook()
     try_install_apply_inventory_hook()
@@ -1886,6 +2185,12 @@ SP.every("host-boot", 1000, 0, function()
     pcall(function() gi:HostGame() end)
     log("HostGame() called (world=" .. WORLD_NAME .. ")")
     write_host_status(true, "hostgame_called")
+end)
+
+-- Retry the save-manager world-load hook in case the BP class loads late.
+SP.every("host-savemgr-hooks", 1000, 250, function()
+    if not hosted then return end
+    try_install_savemgr_hooks()
 end)
 
 -- Hook install retry: on some game builds (e.g. retail build 23659698)

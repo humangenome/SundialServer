@@ -340,7 +340,9 @@ end
 local good_name = {}      -- [controller addr] = last known good RAW name
 local last_seen = {}      -- [controller addr] = last observed raw name (for transition logging)
 local machine_of = {}     -- [machine-shaped clean name] = controller addr that wore it
+local last_machine_name = {} -- [controller addr] = last observed machine-shaped clean name
 SP.canonical_name = SP.canonical_name or {} -- [controller addr] = stable clean character name
+SP.machine_canonical_name = SP.machine_canonical_name or {}
 
 local function keep_name(pc, k)
     local ps = ps_of(pc)
@@ -354,9 +356,26 @@ local function keep_name(pc, k)
     if raw ~= "" and not is_phantom_name(cleaned) then
         good_name[k] = raw
         SP.canonical_name[k] = cleaned
+        local prior_machine = last_machine_name[k]
+        if prior_machine and prior_machine ~= "" and SP.machine_canonical_name[prior_machine] ~= cleaned then
+            if SP.remember_machine_alias then
+                SP.remember_machine_alias(prior_machine, cleaned, k, "name-keeper-recovered")
+            else
+                SP.machine_canonical_name[prior_machine] = cleaned
+            end
+            log("name machine alias [" .. tostring(k) .. "]: '" .. prior_machine .. "' -> '" .. cleaned .. "'")
+        end
         return
     end
-    if raw ~= "" then machine_of[cleaned] = k end
+    if raw ~= "" then
+        machine_of[cleaned] = k
+        last_machine_name[k] = cleaned
+        local alias = SP.machine_canonical_name[cleaned]
+        if alias and alias ~= "" then
+            good_name[k] = alias
+            SP.canonical_name[k] = alias
+        end
+    end
     local want = good_name[k]
     if want and want ~= "" and raw ~= want then
         if set_field(ps, "PlayerNamePrivate", want) then
