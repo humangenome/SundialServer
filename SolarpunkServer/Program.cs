@@ -139,9 +139,9 @@ public static class Program
         var host = Environment.MachineName;
 
         Log.Information("==========================================================");
-        Log.Information("  Solarpunk Server v{Version}  (open-source Solarpunk dedicated host)", solarpunkVer);
-        Log.Information("  https://github.com/humangenome/Solarpunk");
-        Log.Information("  Officially supported by https://www.survivalservers.com");
+        Log.Information("  SundialServer v{Version}  (open-source Solarpunk dedicated host)", solarpunkVer);
+        Log.Information("  https://github.com/HumanGenome/SundialServer");
+        Log.Information("  Official hosting: https://www.survivalservers.com");
         Log.Information("----------------------------------------------------------");
         Log.Information("  host:    {Host}", host);
         Log.Information("  os:      {Os}", os);
