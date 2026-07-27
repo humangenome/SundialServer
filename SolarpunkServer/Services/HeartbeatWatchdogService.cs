@@ -135,10 +135,7 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         }
 
         var status = ReadLuaStatus(statusPath);
-        var luaGateReady = status.exists
-            && status.passwordConfigured
-            && status.ready
-            && IsLuaStatusFresh(status.updatedAt, LuaStatusFreshWindow);
+        var luaGateReady = status.IsGateReady(LuaStatusFreshWindow, DateTimeOffset.UtcNow);
 
         var conn = _state.Connection;
         if (conn is not null)
@@ -170,11 +167,11 @@ public sealed class HeartbeatWatchdogService : BackgroundService
                     "Stopping Solarpunk to prevent the passworded server from running open without the Lua password gate. " +
                     "Diagnose: check UE4SS.log for SolarpunkServerRuntime/SolarpunkAuth load failures.",
                     NoConnectionFailClosedGrace.TotalSeconds,
-                    status.exists,
-                    status.ready,
-                    status.passwordConfigured,
-                    status.reason,
-                    status.updatedAt?.ToUnixTimeSeconds(),
+                    status.Exists,
+                    status.Ready,
+                    status.PasswordConfigured,
+                    status.Reason,
+                    status.UpdatedAt?.ToUnixTimeSeconds(),
                     statusPath);
                 _lastLuaFailClosedWarnAt = noConnNow;
             }
@@ -215,7 +212,7 @@ public sealed class HeartbeatWatchdogService : BackgroundService
                 "Stopping Solarpunk to prevent the passworded server from running open without the Lua password gate. " +
                 "Investigate UE4SS load failure / SolarpunkAuth.lua install / mods.txt ordering; the supervisor will " +
                 "relaunch the game on the next loop.",
-                status.exists, status.ready, status.passwordConfigured, status.reason, status.updatedAt?.ToUnixTimeSeconds(), statusPath);
+                status.Exists, status.Ready, status.PasswordConfigured, status.Reason, status.UpdatedAt?.ToUnixTimeSeconds(), statusPath);
             _lastLuaFailClosedWarnAt = now;
         }
 
@@ -236,53 +233,18 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         }
     }
 
-    private (bool ready, bool passwordConfigured, string reason, bool exists, DateTimeOffset? updatedAt) ReadLuaStatus(string path)
+    private LuaAuthStatus ReadLuaStatus(string path)
     {
         try
         {
-            if (!File.Exists(path))
-            {
-                return (false, false, "file_missing", false, null);
-            }
-            var lines = File.ReadAllLines(path);
-            bool ready = false;
-            bool passwordConfigured = false;
-            string reason = "";
-            DateTimeOffset? updatedAt = null;
-            foreach (var line in lines)
-            {
-                var eq = line.IndexOf('=');
-                if (eq <= 0) continue;
-                var key = line.Substring(0, eq).Trim();
-                var value = line.Substring(eq + 1).Trim();
-                switch (key)
-                {
-                    case "ready": ready = value == "1"; break;
-                    case "passwordConfigured": passwordConfigured = value == "1"; break;
-                    case "reason": reason = value; break;
-                    case "updated":
-                        if (long.TryParse(value, out var unixSeconds))
-                        {
-                            try { updatedAt = DateTimeOffset.FromUnixTimeSeconds(unixSeconds); }
-                            catch { updatedAt = null; }
-                        }
-                        break;
-                }
-            }
-            return (ready, passwordConfigured, reason, true, updatedAt);
+            if (!File.Exists(path)) return LuaAuthStatus.Missing;
+            return LuaAuthStatus.Parse(File.ReadAllLines(path));
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "SolarpunkAuth status read failed: {Path}", path);
-            return (false, false, "read_error", false, null);
+            return LuaAuthStatus.ReadError;
         }
-    }
-
-    private static bool IsLuaStatusFresh(DateTimeOffset? updatedAt, TimeSpan maxAge)
-    {
-        if (updatedAt is null) return false;
-        var age = DateTimeOffset.UtcNow - updatedAt.Value;
-        return age >= TimeSpan.Zero && age <= maxAge;
     }
 
     private static readonly string[] SpKillProcessNameWhitelist = new[]

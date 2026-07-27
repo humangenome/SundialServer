@@ -135,6 +135,7 @@ Mod-registered slash commands also run over RCON, with or without the leading `/
 git clone https://github.com/HumanGenome/SundialServer.git
 cd SundialServer
 dotnet build Solarpunk.Server.sln -c Release
+dotnet test Solarpunk.Server.sln -c Release --no-build
 dotnet publish SolarpunkServer/SolarpunkServer.csproj -c Release -r win-x64 --self-contained true
 ```
 
@@ -163,6 +164,7 @@ what is missing.
 | `native/SolarpunkPlugin/` | the C++ UE4SS plugin source |
 | `runtime/` | UE4SS settings, AOB signatures, and the mod load list |
 | `scripts/` | packaging and signature-verification tooling |
+| `tests/` | unit tests for the fail-closed auth gate and the HTTP signing rules |
 | `docs/`, `protocol/` | administration guides and wire-format contracts |
 
 ## Documentation

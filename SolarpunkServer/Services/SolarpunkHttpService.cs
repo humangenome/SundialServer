@@ -51,8 +51,7 @@ public sealed class SolarpunkHttpService : BackgroundService
     // Sliding window of signatures we've already accepted, so a captured
     // valid request inside the 5-minute replay window can't be re-sent to
     // double-trigger a restore or pile up snapshots.
-    private readonly Dictionary<string, long> _seenSignatures = new();
-    private readonly object _seenSignaturesLock = new();
+    private readonly ReplayGuard _replayGuard = new(ReplayWindowSeconds);
     private HttpListener? _listener;
 
     public SolarpunkHttpService(
@@ -689,7 +688,7 @@ public sealed class SolarpunkHttpService : BackgroundService
         if (!long.TryParse(tsHeader, out var ts)) return null;
 
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        if (Math.Abs(now - ts) > ReplayWindowSeconds) return null;
+        if (!_replayGuard.IsTimestampInWindow(ts, now)) return null;
 
         if (req.ContentLength64 > _opts.MaxUploadBytes)
             throw new BodyTooLargeException();
@@ -700,38 +699,19 @@ public sealed class SolarpunkHttpService : BackgroundService
         var buffered = await BufferBodyToDiskAsync(req, _opts.MaxUploadBytes, ct).ConfigureAwait(false);
         // buffered.Sha256Hex is already lower-hex over the streamed bytes.
 
-        var canonical = $"{method}\n{path}\n{ts}\n{buffered.Sha256Hex}";
-        var expected = Convert.ToHexString(
-            HMACSHA256.HashData(_authKey, Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        var canonical = HmacRequestAuth.CanonicalString(method, path, ts, buffered.Sha256Hex);
+        var expected = HmacRequestAuth.Sign(_authKey, canonical);
 
-        var sigOk = CryptographicOperations.FixedTimeEquals(
-            Encoding.ASCII.GetBytes(expected),
-            Encoding.ASCII.GetBytes(sigHeader.ToLowerInvariant()));
-
-        if (!sigOk)
+        if (!HmacRequestAuth.SignatureMatches(expected, sigHeader))
         {
             buffered.Dispose();
             return null;
         }
 
-        var sigKey = sigHeader.ToLowerInvariant();
-        lock (_seenSignaturesLock)
+        if (!_replayGuard.TryAccept(sigHeader, ts, now))
         {
-            if (_seenSignatures.Count > 0)
-            {
-                var cutoff = now - ReplayWindowSeconds;
-                var toRemove = _seenSignatures
-                    .Where(kv => kv.Value < cutoff)
-                    .Select(kv => kv.Key)
-                    .ToList();
-                foreach (var k in toRemove) _seenSignatures.Remove(k);
-            }
-            if (_seenSignatures.ContainsKey(sigKey))
-            {
-                buffered.Dispose();
-                return null;
-            }
-            _seenSignatures[sigKey] = ts;
+            buffered.Dispose();
+            return null;
         }
 
         return buffered;

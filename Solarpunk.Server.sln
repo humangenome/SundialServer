@@ -15,6 +15,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Solarpunk.Protocol", "Solar
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Solarpunk.Abstractions", "Solarpunk.Abstractions\Solarpunk.Abstractions.csproj", "{1FA986F9-61EA-43F6-9C8E-3FD092A7FDF4}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{D2CDC748-AE98-432C-90C6-8D7314BE8FE2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SolarpunkServer.Tests", "tests\SolarpunkServer.Tests\SolarpunkServer.Tests.csproj", "{CF078442-8965-4EF5-9427-A5DDCE20B583}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -48,5 +52,12 @@ Global
 		{1FA986F9-61EA-43F6-9C8E-3FD092A7FDF4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1FA986F9-61EA-43F6-9C8E-3FD092A7FDF4}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{1FA986F9-61EA-43F6-9C8E-3FD092A7FDF4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CF078442-8965-4EF5-9427-A5DDCE20B583}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CF078442-8965-4EF5-9427-A5DDCE20B583}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CF078442-8965-4EF5-9427-A5DDCE20B583}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CF078442-8965-4EF5-9427-A5DDCE20B583}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{CF078442-8965-4EF5-9427-A5DDCE20B583} = {D2CDC748-AE98-432C-90C6-8D7314BE8FE2}
 	EndGlobalSection
 EndGlobal
