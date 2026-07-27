@@ -1,0 +1,11 @@
+; Solarpunk headless server UE4SS mod load list.
+; Production enables ONLY SolarpunkServerRuntime — it dofile-loads the feature
+; modules (Host, Auth, Roster, Chat) in a fixed order and writes a ready-status
+; file the .NET supervisor polls. Do NOT also enable the feature mods directly.
+CheatManagerEnablerMod : 1
+ConsoleCommandsMod : 1
+ConsoleEnablerMod : 1
+SolarpunkServerRuntime : 1
+
+; Built-in keybinds mod loads last (UE4SS convention)
+Keybinds : 1

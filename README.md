@@ -7,7 +7,7 @@
 
 SundialServer is the open-source host supervisor for Sundial multiplayer in **Solarpunk**. It starts and watches the hosted game process, takes and restores save snapshots, exposes an admin HTTP API, answers Source A2S query, and runs Source RCON.
 
-Players join with the [Sundial app](https://github.com/HumanGenome/Sundial). A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin), which the **release zip bundles** as an `ue4ss-server\` folder — you copy its contents into the game's `Binaries\Win64` directory once. Building from this source yourself produces the supervisor only; see [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
+Players join with the [Sundial app](https://github.com/HumanGenome/Sundial). A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin), which the **release zip bundles** as an `ue4ss-server\` folder — you copy its contents into the game's `Binaries\Win64` directory once. See [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
 
 ## Features
 
@@ -53,7 +53,7 @@ Release builds are self-contained; a separate .NET install is not required for n
 
 Players connect with the Sundial app to `<host>:<GameplayPort>`.
 
-> **Note:** the release zip is complete — it bundles the in-game runtime (UE4SS + Sundial's server mods + the native plugin) alongside the MIT-licensed supervisor. If you build SundialServer from this source instead, you get the supervisor only; without the runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat, roster, or admin tools. Managed hosting includes the runtime and stages it for you.
+> **Note:** the release zip is complete — it bundles the in-game runtime (UE4SS + Sundial's server mods + the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat, roster, or admin tools. Managed hosting includes the runtime and stages it for you.
 
 ## Server Settings
 
@@ -140,11 +140,37 @@ dotnet publish SolarpunkServer/SolarpunkServer.csproj -c Release -r win-x64 --se
 
 Published output lands under `SolarpunkServer/bin/Release/net8.0/win-x64/publish/`.
 
+To build the full distributable instead of just the supervisor:
+
+```bash
+UE4SS_RUNTIME_DIR=/path/to/ue4ss scripts/package-server.sh v<version>
+```
+
+That assembles the supervisor, `runtime/` (UE4SS settings and signatures), the
+Lua mods from `server-mods/`, the native plugin from `native/SolarpunkPlugin/`,
+and the UE4SS runtime binaries into the same `SundialServer-v<version>.zip`
+layout the releases ship, and prints its sha256. The UE4SS runtime binaries and
+the compiled plugin are not in this repo, so supply them or the script tells you
+what is missing.
+
+## Repository Layout
+
+| Path | Contents |
+|---|---|
+| `SolarpunkServer/` | the supervisor host, services, and HTTP/query/RCON surfaces |
+| `Solarpunk.*/` | protocol, persistence, RCON, and A2S query libraries |
+| `server-mods/` | the UE4SS Lua mod stack loaded inside the game process |
+| `native/SolarpunkPlugin/` | the C++ UE4SS plugin source |
+| `runtime/` | UE4SS settings, AOB signatures, and the mod load list |
+| `scripts/` | packaging and signature-verification tooling |
+| `docs/`, `protocol/` | administration guides and wire-format contracts |
+
 ## Documentation
 
 - [docs/ADMIN.md](docs/ADMIN.md) — settings, ports, RCON, the HTTP API, health, snapshots
 - [docs/RUNTIME.md](docs/RUNTIME.md) — boot chain, world persistence, save identity, join auth, troubleshooting
 - [docs/MODS.md](docs/MODS.md) — the mod stack, status files, writing your own host mod
+- [runtime/README.md](runtime/README.md) — what the in-game runtime folder contains and how it is staged
 - [protocol/](protocol/) — wire-format contracts (manifest, chat, map, ModKit, installer)
 
 ## Community Note
