@@ -67,3 +67,54 @@ jobs:
             echo "::error::runtime/Mods/mods.txt must enable SolarpunkServerRuntime and nothing else from the Solarpunk stack."
             exit 1
           fi
+
+  # The bundle guard is the last thing standing between an incomplete build and
+  # a pinned artifact, so it gets its own regression test. Two things are
+  # checked: a bundle shaped exactly like the real one passes, and the same
+  # bundle with its runtime tree removed fails. The second case is the one that
+  # matters — it is within a fraction of a percent of the correct byte count, so
+  # nothing but a layout assertion can tell it apart.
+  bundle-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The guard accepts a complete bundle and rejects an incomplete one
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/verify-server-bundle.py
+
+          root="$(mktemp -d)/SolarpunkServer"
+          rt="$root/ue4ss-server"
+          mkdir -p "$rt/Mods" "$rt/UE4SS_Signatures"
+
+          # A stand-in supervisor publish output, sized like the real one.
+          for i in $(seq 1 340); do echo "x" > "$root/lib$i.dll"; done
+          echo "x" > "$root/SolarpunkServer.exe"
+          echo "x" > "$root/SolarpunkServer.dll"
+          echo "{}" > "$root/SolarpunkServer.runtimeconfig.json"
+          echo "{}" > "$root/appsettings.json"
+
+          head -c 2000000 /dev/urandom > "$rt/UE4SS.dll"
+          echo "x" > "$rt/dwmapi.dll"
+          head -c 100000 /dev/urandom > "$rt/SolarpunkPlugin.dll"
+          cp runtime/UE4SS-settings.ini "$rt/UE4SS-settings.ini"
+          cp runtime/UE4SS_Signatures/*.lua "$rt/UE4SS_Signatures/"
+          cp runtime/Mods/mods.txt "$rt/Mods/mods.txt"
+          for mod in server-mods/*/; do
+            name="$(basename "$mod")"
+            mkdir -p "$rt/Mods/$name/Scripts"
+            cp "$mod/Scripts/main.lua" "$rt/Mods/$name/Scripts/"
+          done
+
+          work="$(dirname "$root")"
+          ( cd "$work" && zip -rq complete.zip SolarpunkServer )
+          python3 scripts/verify-server-bundle.py "$work/complete.zip"
+
+          rm -rf "$rt"
+          ( cd "$work" && zip -rq incomplete.zip SolarpunkServer )
+          if python3 scripts/verify-server-bundle.py "$work/incomplete.zip"; then
+            echo "::error::the guard passed a bundle with no runtime tree"
+            exit 1
+          fi
+          echo "guard rejects the incomplete bundle as expected"
