@@ -21,3 +21,7 @@ CHANGELOG.md
 
 # packaging output
 dist/
+
+# Python bytecode from the local guard scripts
+__pycache__/
+*.pyc
