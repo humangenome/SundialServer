@@ -4,7 +4,7 @@
 
 If you've found a security issue in Sundial (SundialServer, the server mod stack, the native plugin, the launcher, or the admin HTTP API), please **do not** open a public GitHub issue.
 
-Open a private security advisory at https://github.com/HumanGenome/SundialServer/security/advisories/new — that's the preferred channel.
+Open a private security advisory at https://github.com/HumanGenome/SundialServer/security/advisories/new — that's the only reporting channel. There is no security email address for this project; do not send reports to any address that claims to be one.
 
 Include:
 - A description of the vulnerability
