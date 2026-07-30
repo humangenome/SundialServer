@@ -19,7 +19,8 @@ zip, so a released bundle already has everything.
   feature mods in order. Do not enable the feature mods directly; see
   [docs/MODS.md](../docs/MODS.md).
 
-## Not tracked here
-`UE4SS.dll` and `dwmapi.dll` are the upstream UE4SS runtime binaries and
-`SolarpunkPlugin.dll` is built from `native/SolarpunkPlugin/`. The packaging
-script stages all three into the release bundle.
+## Not in this folder
+`UE4SS.dll` and `dwmapi.dll` are the upstream UE4SS runtime binaries, pinned by
+hash in [`vendor/ue4ss/`](../vendor/ue4ss/README.md). `SolarpunkPlugin.dll` is
+built from `native/SolarpunkPlugin/`. The packaging script stages all three into
+the release bundle.

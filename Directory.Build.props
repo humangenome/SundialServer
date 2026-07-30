@@ -18,9 +18,9 @@
     <!-- Version surfaced by AssemblyInformationalVersionAttribute and used
          by SolarpunkVersionInfo.SolarpunkVersion in /api/v1/info responses.
          Bump in lockstep with the public release-notes file and the git tag. -->
-    <Version>0.1.68</Version>
-    <AssemblyVersion>0.1.68.0</AssemblyVersion>
-    <FileVersion>0.1.68.0</FileVersion>
+    <Version>0.1.69</Version>
+    <AssemblyVersion>0.1.69.0</AssemblyVersion>
+    <FileVersion>0.1.69.0</FileVersion>
     <!-- Strip the absolute checkout path from compiled output. Without a
          PathMap the compiler embeds the build machine's source path into the
          assembly (the PDB path record and [CallerFilePath] strings), leaking

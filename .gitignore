@@ -25,3 +25,9 @@ dist/
 # Python bytecode from the local guard scripts
 __pycache__/
 *.pyc
+
+# Native plugin build output and its pinned MinHook checkout. The release
+# workflow produces both fresh; a committed copy is a binary nobody can
+# reproduce from this tree.
+native/SolarpunkPlugin/build/
+native/SolarpunkPlugin/minhook/

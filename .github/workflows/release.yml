@@ -1,0 +1,353 @@
+name: Release
+
+# Tag-triggered. This is the ONLY way a SundialServer bundle gets published.
+#
+# It exists because v0.1.68 was hand-built on a workstation and hand-uploaded.
+# That bundle shipped a developer's home directory in twelve binaries and two
+# internal identifiers in readable Lua, to a public release page and -- because
+# the same file is mirrored to the CDN hosts install from -- to every host
+# running the product. Nothing caught it, because there was nothing to catch it
+# with.
+#
+# So the gates below all run BEFORE the release is created, and then again on
+# the bytes downloaded back from the published release:
+#
+#   source deny list      internal references never reach the public repo
+#   version stamp         the artifact reports the tag it publishes under
+#   pinned runtime        the UE4SS binaries are the reviewed ones, by hash
+#   bundle layout         a complete host bundle, not a bare publish output
+#   privacy               nothing private in any member, in both encodings
+#   never-publish policy  the repo's standing artifact policy
+#   asset set             nothing was attached by hand alongside it
+#
+# Never attach an asset to a SundialServer release by hand. The last job fails
+# if anything shows up that this workflow did not build.
+#
+# workflow_dispatch runs everything except publication, against the version in
+# Directory.Build.props. Rehearse there rather than burning a tag.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The UE4SS runtime is pinned as a file in vendor/ue4ss/, not as a URL.
+  # Upstream re-cuts its moving tag in place and serves different bytes under
+  # the same asset name, so a download-at-release-time pipeline ships whatever
+  # happens to be there that day. See vendor/ue4ss/README.md.
+  UE4SS_SHA256: 09a06d70771938b5117d53f88934e701debb19a16a14ee1ac37d2f6481bdebdc
+  UE4SS_PROXY_SHA256: aa8eeee6a86537febdb4f6e3ba6aba7f825534e3f50092f7cbb745365a52a3dd
+  # MinHook, pinned by commit. build.bat clones the default branch when the
+  # source is absent, which makes the native plugin a different binary on every
+  # release for reasons nobody recorded.
+  MINHOOK_COMMIT: d94c64d32ea37bc4f5ee47d580709f70c6fb6080
+
+jobs:
+  # Cheap Linux preconditions. Everything they catch is permanent once a release
+  # publishes, so they run before a single binary is built.
+  guard:
+    name: Guard release preconditions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "TAG=v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Guard the published source
+        shell: bash
+        run: |
+          # This repo is public. A short deny list guards the terms that must
+          # never appear in it -- internal hosting references, an operator's
+          # machine, support/host identifiers, and headless-auth residue from
+          # sibling projects. The list is encoded so that publishing the guard
+          # does not publish the strings it protects.
+          #
+          # The exclusions matter as much as the list. Three files here carry
+          # deny-listed terms AS DATA: this workflow, the published-artifact
+          # scanner and the bundle privacy gate. Without excluding all three the
+          # guard trips on its own rule tables and no release can ever run --
+          # which is exactly what happened on a sibling repo, where every release
+          # failed from the day the scanner landed until the exclusion was added.
+          BANNED="$(printf '%s' 'c3NwYW5lbHxwYXNzcmNvbnxyeWFucGVubmluZ3RvbnxiLWNkblwubmV0fFN1bmRpYWxDbGllbnR8R29sZGJlcmd8Z29sZGJlcmd8Z2JlX2Zvcmt8c3RlYW1fYXBpNjR8c3RlYW1fc2V0dGluZ3N8Q29sZENsaWVudExvYWRlcnxbVHRdaWNrZXRbIF8jLV0/WzAtOV17Niw3fXxcYmdzWyBfLV0/WzAtOV17NSw3fVxifDUxXC4xNjFcLjEyXC4xMDN8NTFcLjc3XC4xMTlcLjE3WzU2XXwxOThcLjE5OVwuODZcLjE5' | base64 -d)"
+          if grep -rInE "$BANNED" \
+               --exclude-dir=.git --exclude-dir=bin --exclude-dir=obj --exclude-dir=dist \
+               --exclude=release.yml \
+               --exclude=verify-published-artifacts.py \
+               --exclude=verify-bundle-privacy.py \
+               --exclude=artifact-scan.yml . ; then
+            echo "::error::deny-listed term found in the published source"
+            exit 1
+          fi
+          echo "clean"
+
+      - name: Check the tag matches the version stamp
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_version="$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)"
+          tag_version="${TAG#v}"
+          echo "source=$source_version tag=$tag_version"
+          if [ "$source_version" != "$tag_version" ]; then
+            echo "::error::Directory.Build.props is $source_version but the tag is $TAG. Bump the version in the same commit as the tag."
+            exit 1
+          fi
+
+      - name: Check the pinned UE4SS runtime is the reviewed one
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in "vendor/ue4ss/UE4SS.dll ${UE4SS_SHA256}" "vendor/ue4ss/dwmapi.dll ${UE4SS_PROXY_SHA256}"; do
+            set -- $pair
+            if [ ! -f "$1" ]; then
+              echo "::error::pinned runtime missing: $1"
+              exit 1
+            fi
+            got="$(sha256sum "$1" | awk '{print $1}')"
+            if [ "$got" != "$2" ]; then
+              echo "::error::$1 is $got, pinned $2. A UE4SS core swap changes signature scanning and mod loading; validate a real host start and move the pin deliberately."
+              exit 1
+            fi
+            echo "ok $1 $got"
+          done
+
+      - name: Build the release body
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes=".github/release-notes/${TAG}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::missing release notes: $notes. A tag without notes publishes an empty release body, and a release body is not something you get to write later."
+            exit 1
+          fi
+          if [ -z "$(tr -d '[:space:]' < "$notes")" ]; then
+            echo "::error::$notes is empty"
+            exit 1
+          fi
+          cp "$notes" release-body.md
+          cat release-body.md
+
+      - name: Upload the release body
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-body
+          path: release-body.md
+          retention-days: 7
+
+  # The native identity plugin is MSVC-only, so it is the one thing that needs a
+  # Windows runner. Built from source every release -- a vendored copy of our own
+  # code is a binary nobody can reproduce from this tree.
+  native:
+    name: Build SolarpunkPlugin (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch MinHook at the pinned commit
+        shell: pwsh
+        run: |
+          $dest = "native/SolarpunkPlugin/minhook"
+          git init $dest
+          if ($LASTEXITCODE -ne 0) { throw "git init failed" }
+          git -C $dest remote add origin https://github.com/TsudaKageyu/minhook.git
+          git -C $dest fetch --depth 1 origin $env:MINHOOK_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "could not fetch MinHook at $env:MINHOOK_COMMIT" }
+          git -C $dest checkout FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw "could not check out MinHook at $env:MINHOOK_COMMIT" }
+          $head = (git -C $dest rev-parse HEAD).Trim()
+          if ($head -ne $env:MINHOOK_COMMIT) { throw "MinHook is at $head, pinned $env:MINHOOK_COMMIT" }
+          Write-Host "MinHook pinned at $head"
+
+      - name: Build SolarpunkPlugin.dll
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere is not on this runner" }
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no MSVC x64 toolchain on this runner" }
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          cmd /c "`"$vcvars`" >nul && native\SolarpunkPlugin\build.bat"
+          if ($LASTEXITCODE -ne 0) { throw "SolarpunkPlugin build failed" }
+
+      - name: Check the plugin built
+        shell: pwsh
+        run: |
+          $dll = "native/SolarpunkPlugin/build/SolarpunkPlugin.dll"
+          if (-not (Test-Path $dll)) { throw "SolarpunkPlugin.dll was not produced" }
+          $size = (Get-Item $dll).Length
+          Write-Host "SolarpunkPlugin.dll $size bytes sha256=$((Get-FileHash $dll -Algorithm SHA256).Hash.ToLower())"
+          # The bundle guard's floor is 50 KB. Catch a stub here, where the log
+          # still says which compiler produced it.
+          if ($size -lt 50000) { throw "SolarpunkPlugin.dll is $size bytes - that is not a build, it is a stub" }
+
+      - name: Upload the plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: solarpunk-plugin
+          path: native/SolarpunkPlugin/build/SolarpunkPlugin.dll
+          retention-days: 7
+
+  # Packaging runs on Linux and through scripts/package-server.sh -- the same
+  # script a maintainer runs locally. A release built by a private copy of the
+  # packaging steps drifts from the one anyone can reproduce, and the drift is
+  # invisible until it ships.
+  package:
+    name: Package and publish
+    needs: [guard, native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "TAG=v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build Solarpunk.Server.sln -c Release --nologo -warnaserror
+
+      - name: Test
+        run: dotnet test Solarpunk.Server.sln -c Release --no-build --nologo
+
+      - name: Download the native plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: solarpunk-plugin
+          path: native/SolarpunkPlugin/build
+
+      - name: Package the bundle
+        run: bash scripts/package-server.sh "${TAG}"
+
+      - name: Check the bundle reports the tag
+        run: python3 scripts/check-bundle-version.py "dist/SundialServer-${TAG}.zip" "${TAG}"
+
+      - name: Check the bundle layout
+        run: python3 scripts/verify-server-bundle.py "dist/SundialServer-${TAG}.zip"
+
+      - name: Check the bundle carries nothing private
+        run: python3 scripts/verify-bundle-privacy.py "dist/SundialServer-${TAG}.zip"
+
+      - name: Check the bundle against the never-publish policy
+        run: python3 scripts/verify-published-artifacts.py "dist/SundialServer-${TAG}.zip"
+
+      - name: Build checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum "SundialServer-${TAG}.zip" > checksums.txt
+          cat checksums.txt
+
+      - name: Download the release body
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-body
+
+      - name: Create the release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SundialServer ${{ github.ref_name }}
+          files: |
+            dist/SundialServer-${{ github.ref_name }}.zip
+            dist/checksums.txt
+          body_path: release-body.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Author the release as HumanGenome rather than github-actions[bot].
+          # Falls back to the default token if the secret is ever removed -- the
+          # release still publishes, only the byline degrades, and a release
+          # author cannot be corrected afterwards.
+          token: ${{ secrets.HUMANGENOME_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Rehearsal summary
+        if: github.event_name != 'push'
+        shell: bash
+        run: |
+          echo "Rehearsal for ${TAG}: every gate passed and nothing was published."
+          ls -l dist
+
+  # The build log is not the acceptance test. Download what the release actually
+  # serves and put it through the same gates. A published artifact that differs
+  # from the one that was gated is the failure this whole workflow exists to
+  # prevent.
+  verify:
+    name: Verify the published artifact
+    needs: package
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the published asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "${GITHUB_REF_NAME}" -R "${{ github.repository }}" -D published --clobber
+          ls -l published
+
+      - name: The release carries only what this workflow built
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected="$(printf 'SundialServer-%s.zip\nchecksums.txt\n' "${GITHUB_REF_NAME}" | sort)"
+          actual="$(gh release view "${GITHUB_REF_NAME}" -R "${{ github.repository }}" --json assets --jq '.assets[].name' | sort)"
+          echo "$actual"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::the release has assets this workflow did not build. Never attach a SundialServer asset by hand - hand-uploading is how v0.1.68 shipped a developer's home directory."
+            diff <(echo "$expected") <(echo "$actual") || true
+            exit 1
+          fi
+
+      - name: The published bytes match the published checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd published
+          sha256sum -c checksums.txt
+
+      - name: Gate the downloaded artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="published/SundialServer-${GITHUB_REF_NAME}.zip"
+          python3 scripts/check-bundle-version.py "$zip" "${GITHUB_REF_NAME}"
+          python3 scripts/verify-server-bundle.py "$zip"
+          python3 scripts/verify-bundle-privacy.py "$zip"
+          python3 scripts/verify-published-artifacts.py "$zip"

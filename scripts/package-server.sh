@@ -15,8 +15,12 @@
 # the finished zip is checked against scripts/verify-server-bundle.py before the
 # sha is printed.
 #
-# UE4SS runtime binaries are not in this repo. Set UE4SS_RUNTIME_DIR to a folder
-# containing UE4SS.dll + dwmapi.dll, or UE4SS_ZIP_URL to fetch and unzip one.
+# The UE4SS runtime binaries are pinned in vendor/ue4ss/ and picked up from
+# there automatically. Override with UE4SS_RUNTIME_DIR (a folder holding
+# UE4SS.dll + dwmapi.dll) or UE4SS_ZIP_URL (a zip to fetch and unpack) only when
+# deliberately building against a different runtime. Read vendor/ue4ss/README.md
+# first -- the pin is a file, not a URL, because upstream re-cuts its moving tag
+# in place and serves different bytes under the same asset name.
 set -euo pipefail
 TAG="${1:-}"; [[ -z "$TAG" ]] && { echo "usage: $0 <git tag e.g. v0.1.0>" >&2; exit 1; }
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,6 +61,11 @@ cp "$PLUGIN_DLL" "$RT/SolarpunkPlugin.dll"
 echo "    native plugin staged OK"
 
 echo "==> Staging UE4SS runtime binaries (UE4SS.dll + dwmapi.dll)"
+if [[ -z "${UE4SS_RUNTIME_DIR:-}" && -z "${UE4SS_ZIP_URL:-}" \
+      && -f "$HERE/vendor/ue4ss/UE4SS.dll" && -f "$HERE/vendor/ue4ss/dwmapi.dll" ]]; then
+  UE4SS_RUNTIME_DIR="$HERE/vendor/ue4ss"
+  echo "    using the pinned runtime in vendor/ue4ss"
+fi
 if [[ -n "${UE4SS_RUNTIME_DIR:-}" ]]; then
   cp "$UE4SS_RUNTIME_DIR/UE4SS.dll" "$UE4SS_RUNTIME_DIR/dwmapi.dll" "$RT/"
 elif [[ -n "${UE4SS_ZIP_URL:-}" ]]; then

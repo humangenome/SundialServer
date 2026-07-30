@@ -144,15 +144,37 @@ Published output lands under `SolarpunkServer/bin/Release/net8.0/win-x64/publish
 To build the full distributable instead of just the supervisor:
 
 ```bash
-UE4SS_RUNTIME_DIR=/path/to/ue4ss scripts/package-server.sh v<version>
+scripts/package-server.sh v<version>
 ```
 
 That assembles the supervisor, `runtime/` (UE4SS settings and signatures), the
 Lua mods from `server-mods/`, the native plugin from `native/SolarpunkPlugin/`,
-and the UE4SS runtime binaries into the same `SundialServer-v<version>.zip`
-layout the releases ship, and prints its sha256. The UE4SS runtime binaries and
-the compiled plugin are not in this repo, so supply them or the script tells you
-what is missing.
+and the pinned UE4SS runtime binaries from `vendor/ue4ss/` into the same
+`SundialServer-v<version>.zip` layout the releases ship, and prints its sha256.
+Build the native plugin first (`native/SolarpunkPlugin/build.bat`, MSVC); the
+script fails closed and names anything it is missing rather than zipping an
+incomplete bundle.
+
+## Releases
+
+Releases are cut by CI from a tag and never by hand. Push `vX.Y.Z` with
+`Directory.Build.props` bumped in the same commit and `.github/release-notes/vX.Y.Z.md`
+written, and `.github/workflows/release.yml` builds the plugin, packages the
+bundle, and gates it before publishing:
+
+| Gate | What it refuses |
+|---|---|
+| source deny list | internal references reaching this public repo |
+| `scripts/check-bundle-version.py` | a bundle reporting a version other than its tag |
+| pinned runtime hashes | a UE4SS core swapped in without review |
+| `scripts/verify-server-bundle.py` | a bare publish output shipped as a host bundle |
+| `scripts/verify-bundle-privacy.py` | private material in any member, in either encoding |
+| `scripts/verify-published-artifacts.py` | anything the never-publish policy covers |
+
+Every gate then runs again on the artifact downloaded back from the published
+release, and the release is rejected if it carries an asset CI did not build.
+`workflow_dispatch` runs the whole thing without publishing, so a release can be
+rehearsed instead of tagged twice.
 
 ## Repository Layout
 
@@ -163,7 +185,8 @@ what is missing.
 | `server-mods/` | the UE4SS Lua mod stack loaded inside the game process |
 | `native/SolarpunkPlugin/` | the C++ UE4SS plugin source |
 | `runtime/` | UE4SS settings, AOB signatures, and the mod load list |
-| `scripts/` | packaging and signature-verification tooling |
+| `scripts/` | packaging, release gates, and signature-verification tooling |
+| `vendor/ue4ss/` | the pinned upstream UE4SS runtime binaries the bundle ships |
 | `tests/` | unit tests for the fail-closed auth gate and the HTTP signing rules |
 | `docs/`, `protocol/` | administration guides and wire-format contracts |
 
@@ -173,6 +196,7 @@ what is missing.
 - [docs/RUNTIME.md](docs/RUNTIME.md) — boot chain, world persistence, save identity, join auth, troubleshooting
 - [docs/MODS.md](docs/MODS.md) — the mod stack, status files, writing your own host mod
 - [runtime/README.md](runtime/README.md) — what the in-game runtime folder contains and how it is staged
+- [vendor/ue4ss/README.md](vendor/ue4ss/README.md) — why the UE4SS runtime is pinned as a file and how to move the pin
 - [protocol/](protocol/) — wire-format contracts (manifest, chat, map, ModKit, installer)
 
 ## Community Note
