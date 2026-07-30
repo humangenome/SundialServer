@@ -42,9 +42,9 @@ env:
   # happens to be there that day. See vendor/ue4ss/README.md.
   UE4SS_SHA256: 09a06d70771938b5117d53f88934e701debb19a16a14ee1ac37d2f6481bdebdc
   UE4SS_PROXY_SHA256: aa8eeee6a86537febdb4f6e3ba6aba7f825534e3f50092f7cbb745365a52a3dd
-  # MinHook, pinned by commit. build.bat clones the default branch when the
-  # source is absent, which makes the native plugin a different binary on every
-  # release for reasons nobody recorded.
+  # MinHook, pinned by commit. The build scripts clone the default branch when
+  # the source is absent, which makes the native plugin a different binary on
+  # every release for reasons nobody recorded.
   MINHOOK_COMMIT: d94c64d32ea37bc4f5ee47d580709f70c6fb6080
 
 jobs:
@@ -148,11 +148,11 @@ jobs:
           path: release-body.md
           retention-days: 7
 
-  # The native identity plugin is MSVC-only, so it is the one thing that needs a
-  # Windows runner. Built from source every release -- a vendored copy of our own
-  # code is a binary nobody can reproduce from this tree.
-  native:
-    name: Build SolarpunkPlugin (windows-latest)
+  # build.bat is the documented MSVC path for a Windows workstation. It does not
+  # produce the shipped binary (see native/SolarpunkPlugin/build.sh for why), so
+  # its output is discarded -- this job exists only to stop that path rotting.
+  msvc-check:
+    name: Check the MSVC build path still compiles
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -174,7 +174,7 @@ jobs:
           if ($head -ne $env:MINHOOK_COMMIT) { throw "MinHook is at $head, pinned $env:MINHOOK_COMMIT" }
           Write-Host "MinHook pinned at $head"
 
-      - name: Build SolarpunkPlugin.dll
+      - name: Build with build.bat
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -184,25 +184,10 @@ jobs:
           $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
           if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
           cmd /c "`"$vcvars`" >nul && native\SolarpunkPlugin\build.bat"
-          if ($LASTEXITCODE -ne 0) { throw "SolarpunkPlugin build failed" }
-
-      - name: Check the plugin built
-        shell: pwsh
-        run: |
+          if ($LASTEXITCODE -ne 0) { throw "the MSVC build path is broken" }
           $dll = "native/SolarpunkPlugin/build/SolarpunkPlugin.dll"
-          if (-not (Test-Path $dll)) { throw "SolarpunkPlugin.dll was not produced" }
-          $size = (Get-Item $dll).Length
-          Write-Host "SolarpunkPlugin.dll $size bytes sha256=$((Get-FileHash $dll -Algorithm SHA256).Hash.ToLower())"
-          # The bundle guard's floor is 50 KB. Catch a stub here, where the log
-          # still says which compiler produced it.
-          if ($size -lt 50000) { throw "SolarpunkPlugin.dll is $size bytes - that is not a build, it is a stub" }
-
-      - name: Upload the plugin
-        uses: actions/upload-artifact@v4
-        with:
-          name: solarpunk-plugin
-          path: native/SolarpunkPlugin/build/SolarpunkPlugin.dll
-          retention-days: 7
+          if (-not (Test-Path $dll)) { throw "build.bat produced nothing" }
+          Write-Host "build.bat OK: $((Get-Item $dll).Length) bytes (not shipped)"
 
   # Packaging runs on Linux and through scripts/package-server.sh -- the same
   # script a maintainer runs locally. A release built by a private copy of the
@@ -210,7 +195,7 @@ jobs:
   # invisible until it ships.
   package:
     name: Package and publish
-    needs: [guard, native]
+    needs: [guard, msvc-check]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -238,11 +223,34 @@ jobs:
       - name: Test
         run: dotnet test Solarpunk.Server.sln -c Release --no-build --nologo
 
-      - name: Download the native plugin
-        uses: actions/download-artifact@v4
-        with:
-          name: solarpunk-plugin
-          path: native/SolarpunkPlugin/build
+      # The shipped plugin is a mingw-w64 build. That is not a preference: the
+      # published v0.1.68 binary every host runs today is one, and this recipe
+      # reproduces it at exactly its byte count. An MSVC build of the same
+      # source is a 200 KB binary with no export table -- almost certainly fine,
+      # and not something to find out about on a live fleet.
+      - name: Install the cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+
+      - name: Build SolarpunkPlugin.dll
+        run: bash native/SolarpunkPlugin/build.sh
+
+      - name: Check the plugin is a real build of this source
+        shell: bash
+        run: |
+          set -euo pipefail
+          dll=native/SolarpunkPlugin/build/SolarpunkPlugin.dll
+          [ -f "$dll" ] || { echo "::error::SolarpunkPlugin.dll was not produced"; exit 1; }
+          size=$(stat -c%s "$dll")
+          echo "$size bytes  sha256=$(sha256sum "$dll" | awk '{print $1}')"
+          # A stub clears the bundle guard's 50 KB floor on size alone. Assert the
+          # source's own diagnostics are in the binary instead.
+          for marker in 'GetPreferredUniqueNetId hook failed' 'SolarpunkPlugin scan failed' 'sp-plugin.log'; do
+            if ! grep -qF "$marker" "$dll"; then
+              echo "::error::the built plugin does not contain \"$marker\" - it is not a build of this source"
+              exit 1
+            fi
+          done
+          echo "plugin carries its source diagnostics"
 
       - name: Package the bundle
         run: bash scripts/package-server.sh "${TAG}"

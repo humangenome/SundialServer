@@ -15,7 +15,9 @@
 //   mod (it re-issues BeginLoadData(synth) so the per-player key lands last). See IMPLEMENTATION-SPEC.md.
 //
 // Targets are AOB-scanned at load (RVAs shift per game patch). Patterns derived from the shipped PDB
-// of build SolarpunkSteam-Win64-Shipping. Build: MSVC (x64) + MinHook (see build.bat).
+// of build SolarpunkSteam-Win64-Shipping. Build: mingw-w64 (x64) + MinHook via build.sh --
+// that is what releases ship and what reproduces the published binary. build.bat is the
+// MSVC path for a Windows workstation; it compiles the same source to a different binary.
 //
 // Load note: UE4SS unloads non-SDK DLLs, so inject this AFTER the game is up (tools/inject-plugin-all.ps1),
 // keep it DISABLED in UE4SS mods.txt. Diagnostics go to C:\Users\Public\sp-plugin.log.

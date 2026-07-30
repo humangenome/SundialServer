@@ -151,9 +151,10 @@ That assembles the supervisor, `runtime/` (UE4SS settings and signatures), the
 Lua mods from `server-mods/`, the native plugin from `native/SolarpunkPlugin/`,
 and the pinned UE4SS runtime binaries from `vendor/ue4ss/` into the same
 `SundialServer-v<version>.zip` layout the releases ship, and prints its sha256.
-Build the native plugin first (`native/SolarpunkPlugin/build.bat`, MSVC); the
-script fails closed and names anything it is missing rather than zipping an
-incomplete bundle.
+Build the native plugin first -- `native/SolarpunkPlugin/build.sh` (mingw-w64,
+what releases ship) or `build.bat` (MSVC, for a Windows workstation). The
+packaging script fails closed and names anything it is missing rather than
+zipping an incomplete bundle.
 
 ## Releases
 
