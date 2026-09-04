@@ -171,6 +171,18 @@ write_host_status(false, "booting")
 -- property lists in join/save/tick paths.
 local ENABLE_DYNAMIC_FIELD_SCANS = false
 
+-- The broad scans above stay off. The inventory-apply parameter is a different
+-- shape of thing, though: a small function-parameter struct, not a live
+-- controller or save object, and it is the one place where the exact-name write
+-- has never once matched a field. Every server logs the same
+-- "Inventory param set ... changed=false struct_ok=false", which is why a
+-- player's inventory is never bound to their save and every join hands out the
+-- starting kit. Enumerate THAT struct, guarded and bounded, to resolve
+-- Blueprint-mangled member names, and report the real field list when the stamp
+-- still finds nothing so the next join names the field instead of failing
+-- silently.
+local ENABLE_INVENTORY_PARAM_INTROSPECT = true
+
 local WORLD_SLOT_FIELDS = {
     "WorldSaveName",
     "WorldName",
@@ -657,7 +669,7 @@ local function persist_machine_aliases()
         machine_name = machine_alias_field(machine_name)
         canonical_name = machine_alias_field(canonical_name)
         if machine_name ~= "" and canonical_name ~= "" and
-            is_transient_identity_name(machine_name) and not is_transient_identity_name(canonical_name) then
+            machine_name ~= canonical_name and not is_transient_identity_name(canonical_name) then
             f:write(machine_name .. "\t" .. canonical_name .. "\n")
         end
     end
@@ -669,7 +681,11 @@ local function remember_machine_alias(machine_name, canonical_name, k, why)
     machine_name = machine_alias_field(machine_name)
     canonical_name = machine_alias_field(canonical_name)
     if machine_name == "" or canonical_name == "" then return end
-    if not is_transient_identity_name(machine_name) or is_transient_identity_name(canonical_name) then return end
+    -- The source name does not have to look transient. A machine-derived name
+    -- like "Name_Surname-07088ACA40" passes is_legacy_launcher_identity, so the
+    -- old guard refused to record exactly the aliases that matter and the save
+    -- stayed keyed to the machine. Only the target has to be a real name.
+    if machine_name == canonical_name or is_transient_identity_name(canonical_name) then return end
     if SP.machine_canonical_name[machine_name] ~= canonical_name then
         SP.machine_canonical_name[machine_name] = canonical_name
         machine_alias_dirty = true
@@ -693,7 +709,7 @@ local function load_machine_aliases()
         machine_name = machine_alias_field(machine_name)
         canonical_name = machine_alias_field(canonical_name)
         if machine_name ~= "" and canonical_name ~= "" and
-            is_transient_identity_name(machine_name) and not is_transient_identity_name(canonical_name) then
+            machine_name ~= canonical_name and not is_transient_identity_name(canonical_name) then
             SP.machine_canonical_name[machine_name] = canonical_name
             loaded = loaded + 1
         end
@@ -710,6 +726,15 @@ local function stable_pname(c, k)
     if nm == "" then return nil end
     if raw ~= "" and raw ~= nm then
         remember_machine_alias(raw, nm, k, "canonical-name")
+    end
+    -- A name already seen to resolve to a real character keys to that character
+    -- from the first tick of the next session. Without this the save locks to
+    -- the machine-derived name the client opens with and then ignores the real
+    -- one, which cannot arrive until the client has finished loading its world.
+    local known = SP.machine_canonical_name and SP.machine_canonical_name[nm]
+    if known and known ~= "" and known ~= nm and not is_transient_identity_name(known) then
+        if SP.canonical_name then SP.canonical_name[k] = known end
+        return known
     end
     if is_transient_identity_name(nm) then
         local alias = SP.machine_canonical_name and SP.machine_canonical_name[nm]
@@ -1150,6 +1175,71 @@ prop_kind = function(prop)
     pcall(function() full = tostring(prop:GetFullName()) end)
     return full:match("^(%a+)Property") or full
 end
+-- Blueprint-authored members are stored as "<Name>_<Index>_<GUID>" (for example
+-- UniquePlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363, which had to be pinned by
+-- hand in controller_id_fields below). An exact-name lookup misses every one of
+-- them, so recover the authored name generically instead of pinning the next.
+local function demangled_base(name)
+    local base, guid = tostring(name or ""):match("^(.+)_%d+_(%x+)$")
+    if not base or not guid or #guid < 16 then return nil end
+    return base
+end
+
+-- One bounded, guarded enumeration of a struct's property names. Returns nil
+-- when enumeration is unavailable or throws, so every caller falls back to the
+-- exact-name behaviour it had before.
+local function struct_property_names(s, limit)
+    if not validish(s) then return nil end
+    limit = limit or 64
+    local names = {}
+    local ok = pcall(function()
+        s:ForEachProperty(function(prop)
+            if #names >= limit then return end
+            local n = prop_name(prop)
+            if n then names[#names + 1] = n end
+        end)
+    end)
+    if not ok or #names == 0 then return nil end
+    return names
+end
+
+-- Expand a wanted-field list with any Blueprint-mangled member of the same
+-- authored name that this struct actually carries. The exact names stay first
+-- and unchanged, so this can only ever add reachable fields, never retarget an
+-- existing one.
+--
+-- Enumerated at most ONCE per field list per process, and only after the
+-- exact-name pass has already missed. Property enumeration is the operation
+-- that has crashed these UE4SS builds before, so it must not run per join.
+local mangled_field_cache = {}
+local function expand_mangled_fields(s, fields)
+    local cached = mangled_field_cache[fields]
+    if cached ~= nil then
+        if cached == false then return fields end
+        return cached
+    end
+    local names = struct_property_names(s)
+    if not names then
+        mangled_field_cache[fields] = false
+        return fields
+    end
+    local wanted, out, seen = {}, {}, {}
+    for _, f in ipairs(fields) do
+        wanted[tostring(f):lower()] = true
+        out[#out + 1] = f
+        seen[f] = true
+    end
+    for _, n in ipairs(names) do
+        local base = demangled_base(n)
+        if base and wanted[base:lower()] and not seen[n] then
+            seen[n] = true
+            out[#out + 1] = n
+        end
+    end
+    mangled_field_cache[fields] = out
+    return out
+end
+
 local function struct_field_guid(s, field)
     if not validish(s) then return nil end
     local value
@@ -1387,6 +1477,12 @@ local function inventory_param_id(s)
         local v = struct_field_guid(s, field) or struct_field_string(s, field)
         if v and not is_blank_guid(v) and not is_blank_id(v) then found = v; break end
     end
+    if not found and ENABLE_INVENTORY_PARAM_INTROSPECT then
+        for _, field in ipairs(expand_mangled_fields(s, strict_inventory_id_fields)) do
+            local v = struct_field_guid(s, field) or struct_field_string(s, field)
+            if v and not is_blank_guid(v) and not is_blank_id(v) then found = v; break end
+        end
+    end
     if found then return found end
     if ENABLE_DYNAMIC_FIELD_SCANS then
         pcall(function()
@@ -1429,6 +1525,25 @@ local function stamp_inventory_param(param, sid, why)
     local did = set_struct_guid_fields(s, strict_inventory_id_fields, inv_id, label, false)
     did = set_struct_string_fields(s, strict_inventory_id_fields, inv_id, label, false) or did
     did = set_struct_matching_inventory_props(s, inv_id, label, true) or did
+    if not did and ENABLE_INVENTORY_PARAM_INTROSPECT then
+        local expanded = expand_mangled_fields(s, strict_inventory_id_fields)
+        if #expanded > #strict_inventory_id_fields then
+            did = set_struct_guid_fields(s, expanded, inv_id, label, false) or did
+            did = set_struct_string_fields(s, expanded, inv_id, label, false) or did
+        end
+        if not did then
+            -- Nothing on this struct carries an inventory id under any authored
+            -- name. Say what it does carry, once per process, so the next join
+            -- names the field to key instead of failing silently again.
+            local shape_key = "inventory-param-shape"
+            if not field_stamp_log[shape_key] then
+                field_stamp_log[shape_key] = true
+                local names = struct_property_names(s, 32)
+                log("Inventory param shape " ..
+                    (names and table.concat(names, ",") or "(enumeration unavailable)"))
+            end
+        end
+    end
     local ok_struct = false
     if did then ok_struct = pcall(function() param:set(s) end) end
     local after = inventory_param_id(s)
