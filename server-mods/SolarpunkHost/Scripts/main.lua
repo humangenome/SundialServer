@@ -1547,14 +1547,25 @@ local function stamp_inventory_param(param, sid, why)
     local ok_struct = false
     if did then ok_struct = pcall(function() param:set(s) end) end
     local after = inventory_param_id(s)
+    -- The sibling playerdata stamp lands through a table patch when the
+    -- per-field struct writes do not, and on this build that is the only path
+    -- that works: it reports table_ok=true on the very saves where this one
+    -- reported changed=false, and the inventory parameter does not even support
+    -- property enumeration. Take the same route rather than giving up on it.
+    local ok_table = false
+    if normalize_hex32(after) ~= inv_id then
+        local patch = {}
+        for _, field in ipairs(strict_inventory_id_fields) do patch[field] = inv_id end
+        ok_table = pcall(function() param:set(patch) end)
+    end
     local key = "Inventory param set why=" .. tostring(why or "") .. " sid=" .. sid
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
         log(key .. " inv=" .. inv_id .. " before=" .. tostring(before or "") ..
             " after=" .. tostring(after or "") .. " changed=" .. tostring(did) ..
-            " struct_ok=" .. tostring(ok_struct))
+            " struct_ok=" .. tostring(ok_struct) .. " table_ok=" .. tostring(ok_table))
     end
-    return normalize_hex32(after) == inv_id or did or ok_struct
+    return normalize_hex32(after) == inv_id or did or ok_struct or ok_table
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
