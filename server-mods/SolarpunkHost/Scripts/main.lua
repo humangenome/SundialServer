@@ -2054,30 +2054,11 @@ local function try_install_bld_hook()
                 pcall(function() key = p1:get():ToString() end)
                 local sid, name_label = load_sid_for_controller(c, k)
                 if is_blank_id(key) then
-                    -- The client's own key is blank ("TESTING UID": no platform
-                    -- identity), and letting the game run that load first hands
-                    -- the player a blank record before the corrected re-load a
-                    -- tick later; the client kept the blank one (fresh character,
-                    -- starting items, quickbar desync) while the server pawn held
-                    -- the real save (second hosted session, 2026-09-07). Rewrite
-                    -- the parameter so the game's first load already carries the
-                    -- synthetic id. The scheduled recovery below still runs as the
-                    -- proven fallback; with a successful rewrite it re-loads the
-                    -- same record, which is harmless.
-                    if isSynth(sid) then
-                        local ok_set = pcall(function() p1:set(sid) end)
-                        local after = param_string(p1)
-                        local log_key = tostring(k) .. ":" .. tostring(sid) .. ":rewrite"
-                        if not recovery_log[log_key] then
-                            recovery_log[log_key] = true
-                            log("BeginLoadData key rewritten [" .. tostring(k) ..
-                                "] key=" .. tostring(key) ..
-                                " -> " .. tostring(sid) ..
-                                " ok=" .. tostring(ok_set) ..
-                                " after=" .. tostring(after) ..
-                                " landed=" .. tostring(after == sid))
-                        end
-                    end
+                    -- Writing the parameter here does not reach the Blueprint VM
+                    -- (re-proven 2026-09-07: the readback showed the new value and the
+                    -- game still ran the load with the blank key). The corrected load is
+                    -- re-issued from the tick below; see the dead-end list in the
+                    -- keying section.
                     if recovered_load_already(k, sid) then
                         reject_remote_identity(c, k, key, sid, "blank-load-key", true)
                         mark_invalid_identity_recovered(k, sid, name_label)
@@ -2401,8 +2382,112 @@ end)
 
 -- Keep the active save slot pinned between the game's own autosaves. This
 -- clears random post-host slot aliases quickly without forcing extra saves.
+-- One-shot layout dump of the save manager, so the blank-key load can be
+-- answered from the player's own record. Runs once after hosting, names only
+-- plus array sizes and the first element's fields; no writes.
+local save_layout_dumped = false
+local function layout_lines_for_class(cls, limit)
+    local lines = {}
+    local guard = 0
+    while validish(cls) and guard < 8 and #lines < limit do
+        guard = guard + 1
+        pcall(function()
+            cls:ForEachProperty(function(prop)
+                if #lines >= limit then return end
+                pcall(function()
+                    local kind = ""
+                    pcall(function() kind = prop:GetClass():GetFName():ToString() end)
+                    local n = prop_name(prop) or "?"
+                    lines[#lines + 1] = { kind = kind, name = n }
+                end)
+            end)
+        end)
+        local sup
+        if not pcall(function() sup = cls:GetSuperStruct() end) or not validish(sup) then break end
+        cls = sup
+    end
+    return lines
+end
+local function describe_value(v)
+    if v == nil then return "nil" end
+    if type(v) ~= "userdata" then return tostring(v):sub(1, 80) end
+    local s
+    if pcall(function() s = v:ToString() end) and type(s) == "string" then return s:sub(1, 80) end
+    local n
+    if pcall(function() n = v:GetArrayNum() end) and n then return "array n=" .. tostring(n) end
+    local full
+    if pcall(function() full = v:GetFullName() end) and full then return tostring(full):sub(1, 120) end
+    return type(v)
+end
+local function dump_element(label, e)
+    local names = struct_property_names(e, 48)
+    if not names then
+        local cls
+        if pcall(function() cls = e:GetClass() end) and validish(cls) then
+            names = {}
+            for _, l in ipairs(layout_lines_for_class(cls, 48)) do names[#names + 1] = l.name end
+        end
+    end
+    if not names or #names == 0 then
+        log(label .. " fields=(enumeration unavailable) value=" .. describe_value(e))
+        return
+    end
+    for _, fn in ipairs(names) do
+        local v
+        pcall(function() v = e[fn] end)
+        log(label .. " ." .. fn .. "=" .. describe_value(v))
+    end
+end
+local function dump_object_layout(obj, label, depth)
+    if not validish(obj) then return end
+    local cls
+    if not pcall(function() cls = obj:GetClass() end) or not validish(cls) then return end
+    local lines = layout_lines_for_class(cls, 160)
+    log(label .. " layout: " .. #lines .. " properties")
+    for _, l in ipairs(lines) do
+        local extra = ""
+        if l.kind == "ArrayProperty" or l.kind == "MapProperty" or l.kind == "ObjectProperty" or
+            l.kind == "StrProperty" or l.kind == "NameProperty" then
+            local v
+            pcall(function() v = obj[l.name] end)
+            extra = " = " .. describe_value(v)
+        end
+        log(label .. " prop " .. l.kind .. " " .. l.name .. extra)
+    end
+    for _, l in ipairs(lines) do
+        if l.kind == "ArrayProperty" then
+            pcall(function()
+                local arr = obj[l.name]
+                local n = arr:GetArrayNum()
+                if n > 0 then dump_element(label .. "." .. l.name .. "[1]", arr[1]) end
+            end)
+        elseif l.kind == "ObjectProperty" and depth > 0 then
+            local lower = l.name:lower()
+            if lower:find("save", 1, true) or lower:find("data", 1, true) then
+                pcall(function()
+                    local o = obj[l.name]
+                    if validish(o) then dump_object_layout(o, label .. "." .. l.name, depth - 1) end
+                end)
+            end
+        end
+    end
+end
+local function dump_save_manager_layout()
+    if save_layout_dumped then return end
+    save_layout_dumped = true
+    pcall(function()
+        local sm = FindFirstOf("BPC_SaveManager_C")
+        if not validish(sm) then
+            log("save manager layout: BPC_SaveManager_C not found")
+            return
+        end
+        dump_object_layout(sm, "SaveManager", 1)
+    end)
+end
+
 SP.every("host-save-normalize", 15000, 7000, function()
     if not hosted then return end
+    if runtime_hosted then dump_save_manager_layout() end
     enforce_world_slot_runtime("sweep")
     normalize_save_games_dir("sweep")
 end)
