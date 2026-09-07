@@ -2036,6 +2036,147 @@ end
 -- transition was a prime crash suspect on UE4SS-on-5.7). The hook now fails
 -- closed on bad load keys and stamps SP.transition so Roster/Chat/Auth keep
 -- their hands off the controller until the join transition settles.
+
+-- ---------------------------------------------------------------------------
+-- Answer the client's own blank-key load from the player's record.
+--
+-- The client decides "new character" from the answer to ITS request, which
+-- carries the blank key, and then runs its new-character setup over whatever
+-- the corrected re-issued load has already restored (seen 2026-09-07: a fresh
+-- axe written over the saved one three times per login). The parameter cannot
+-- be changed (dead-end list above), but the lookup it performs can be
+-- satisfied: BPC_SaveManager.CachedSave.SavedPlayers holds one record per
+-- player id, so for the duration of that one synchronous call the player's own
+-- record answers to the blank key and any record already under the blank key
+-- is parked. Both are put back in the post-hook, with a one-second guard in
+-- case it never runs.
+-- ---------------------------------------------------------------------------
+local SAVED_PLAYER_ID_FIELD = "PlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363"
+local saved_player_id_field_cache = nil
+local pending_key_swaps = {}
+local key_swap_log = {}
+local function saved_players_array()
+    local sm = FindFirstOf("BPC_SaveManager_C")
+    if not validish(sm) then return nil end
+    local save
+    if not pcall(function() save = sm.CachedSave end) or not validish(save) then return nil end
+    local arr
+    if not pcall(function() arr = save.SavedPlayers end) or arr == nil then return nil end
+    return arr
+end
+local function saved_player_id_field(e)
+    if saved_player_id_field_cache then return saved_player_id_field_cache end
+    local v
+    if pcall(function() v = e[SAVED_PLAYER_ID_FIELD] end) and v ~= nil then
+        saved_player_id_field_cache = SAVED_PLAYER_ID_FIELD
+        return saved_player_id_field_cache
+    end
+    local names = struct_property_names(e, 64)
+    if names then
+        for _, n in ipairs(names) do
+            if n:match("^PlayerID") then
+                saved_player_id_field_cache = n
+                return n
+            end
+        end
+    end
+    return nil
+end
+local function read_saved_player_id(e, field)
+    local v
+    if not pcall(function() v = e[field] end) or v == nil then return nil end
+    if type(v) == "string" then return v end
+    local str
+    if pcall(function() str = v:ToString() end) and type(str) == "string" then return str end
+    return nil
+end
+local function write_saved_player_id(e, field, value)
+    local ok = pcall(function() e[field] = value end)
+    return ok and read_saved_player_id(e, field) == value
+end
+local function restore_saved_player_key(k, why)
+    local job = pending_key_swaps[k]
+    if not job then return end
+    pending_key_swaps[k] = nil
+    local arr = saved_players_array()
+    local field = saved_player_id_field_cache
+    if not arr or not field then return end
+    local n = 0
+    pcall(function() n = arr:GetArrayNum() end)
+    local restored_own, restored_blank = false, false
+    for i = 1, n do
+        local e
+        if pcall(function() e = arr[i] end) and e ~= nil then
+            local id = read_saved_player_id(e, field)
+            if id == job.blank and not restored_own then
+                restored_own = write_saved_player_id(e, field, job.sid)
+            elseif id == job.parked then
+                restored_blank = write_saved_player_id(e, field, job.blank)
+            end
+        end
+    end
+    log("BeginLoadData record swap restored [" .. tostring(k) .. "] sid=" .. tostring(job.sid) ..
+        " why=" .. tostring(why or "") .. " own=" .. tostring(restored_own) ..
+        " parked_back=" .. tostring(restored_blank) .. " had_parked=" .. tostring(job.had_parked))
+end
+local function restore_stale_key_swaps(max_age)
+    local now = os.time()
+    for k, job in pairs(pending_key_swaps) do
+        if now - (job.at or now) >= (max_age or 1) then restore_saved_player_key(k, "stale-guard") end
+    end
+end
+local function swap_saved_player_key(k, sid, blank_key)
+    restore_stale_key_swaps(0)
+    if not isSynth(sid) then return false end
+    blank_key = tostring(blank_key or "")
+    local arr = saved_players_array()
+    if not arr then return false end
+    local n = 0
+    if not pcall(function() n = arr:GetArrayNum() end) then return false end
+    local field, own_i, blank_i
+    for i = 1, n do
+        local e
+        if pcall(function() e = arr[i] end) and e ~= nil then
+            field = field or saved_player_id_field(e)
+            if field then
+                local id = read_saved_player_id(e, field)
+                if id == sid then
+                    own_i = own_i or i
+                elseif id == blank_key then
+                    blank_i = blank_i or i
+                end
+            end
+        end
+    end
+    local log_key = tostring(k) .. ":" .. tostring(sid)
+    if not own_i then
+        if not key_swap_log[log_key .. ":none"] then
+            key_swap_log[log_key .. ":none"] = true
+            log("BeginLoadData record swap: no saved record for sid=" .. tostring(sid) ..
+                " (records=" .. tostring(n) .. ", field=" .. tostring(field) .. "); the game makes a new one")
+        end
+        return false
+    end
+    local parked = blank_key .. "#parked"
+    local ok_blank = true
+    if blank_i then ok_blank = write_saved_player_id(arr[blank_i], field, parked) end
+    local ok_own = ok_blank and write_saved_player_id(arr[own_i], field, blank_key)
+    if not ok_own then
+        if blank_i and ok_blank then write_saved_player_id(arr[blank_i], field, blank_key) end
+        if not key_swap_log[log_key .. ":fail"] then
+            key_swap_log[log_key .. ":fail"] = true
+            log("BeginLoadData record swap FAILED [" .. tostring(k) .. "] sid=" .. tostring(sid) ..
+                " field=" .. tostring(field) .. " blank_ok=" .. tostring(ok_blank))
+        end
+        return false
+    end
+    pending_key_swaps[k] = { sid = sid, blank = blank_key, parked = parked, had_parked = blank_i ~= nil, at = os.time() }
+    log("BeginLoadData record swapped in [" .. tostring(k) .. "] sid=" .. tostring(sid) ..
+        " answers key=" .. blank_key .. " record=" .. tostring(own_i) .. "/" .. tostring(n) ..
+        " parked=" .. tostring(blank_i ~= nil))
+    return true
+end
+
 local BLD_CLASS = "/Game/Code/Character/BP_MainPlayerController.BP_MainPlayerController_C"
 local ld_hooked, ld_tries = false, 0
 local function try_install_bld_hook()
@@ -2059,6 +2200,7 @@ local function try_install_bld_hook()
                     -- game still ran the load with the blank key). The corrected load is
                     -- re-issued from the tick below; see the dead-end list in the
                     -- keying section.
+                    swap_saved_player_key(k, sid, key)
                     if recovered_load_already(k, sid) then
                         reject_remote_identity(c, k, key, sid, "blank-load-key", true)
                         mark_invalid_identity_recovered(k, sid, name_label)
@@ -2109,6 +2251,7 @@ local function try_install_bld_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
+                restore_saved_player_key(k, "post-hook")
                 mark_controller_seen(k)
                 SP.transition[k] = os.time()
             end)
@@ -2484,6 +2627,12 @@ local function dump_save_manager_layout()
         dump_object_layout(sm, "SaveManager", 1)
     end)
 end
+
+-- If the BeginLoadData post-hook ever fails to run, put swapped records back.
+SP.every("host-key-swap-guard", 1000, 500, function()
+    if not hosted then return end
+    pcall(restore_stale_key_swaps, 1)
+end)
 
 SP.every("host-save-normalize", 15000, 7000, function()
     if not hosted then return end
