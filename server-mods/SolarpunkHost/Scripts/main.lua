@@ -299,6 +299,15 @@ local function enforce_world_slot_fields(obj, label)
     return did
 end
 
+-- Set once HostGame() has run. After that point the game creates and destroys
+-- transient save objects on its own async save path ("Duplicating save game
+-- object"), and enumerating the save-system class while one of those is
+-- pending destruction read freed memory: two host crashes (2026-09-04 and
+-- 2026-09-07, both EXCEPTION_ACCESS_VIOLATION inside UE4SS one second after a
+-- sweep that followed a player-triggered save). The singletons below are
+-- stable; the class enumeration is pre-host only.
+local runtime_hosted = false
+local lvp_skip_logged = false
 local function enforce_world_slot_runtime(reason)
     local did = false
     local gi = FindFirstOf("BP_SkyGameInstance_C")
@@ -308,6 +317,13 @@ local function enforce_world_slot_runtime(reason)
     local sm = FindFirstOf("BPC_SaveManager_C")
     if sm and sm:IsValid() then
         did = enforce_world_slot_fields(sm, "SaveManager.runtime." .. tostring(reason or "")) or did
+    end
+    if runtime_hosted then
+        if not lvp_skip_logged then
+            lvp_skip_logged = true
+            log("world slot enforce: save-system class enumeration is pre-host only, skipped after HostGame")
+        end
+        return did
     end
     for _, cname in ipairs({ "LVP_SaveSystem_C", "LVP_SaveSystem" }) do
         local ok, objs = pcall(FindAllOf, cname)
@@ -724,7 +740,12 @@ local function stable_pname(c, k)
         nm = SP.canonical_name[k]
     end
     if nm == "" then return nil end
-    if raw ~= "" and raw ~= nm then
+    -- Only a machine-derived source may alias to a real name. Recording the
+    -- other direction (real name -> machine name) put "MatsLund\tMats_Lund-07088ACA40"
+    -- in the alias file on 2026-09-07, which keys nothing and only misleads.
+    if raw ~= "" and raw ~= nm and
+        (is_legacy_launcher_identity(raw) or is_transient_identity_name(raw)) and
+        not is_legacy_launcher_identity(nm) then
         remember_machine_alias(raw, nm, k, "canonical-name")
     end
     -- A name already seen to resolve to a real character keys to that character
@@ -2033,6 +2054,30 @@ local function try_install_bld_hook()
                 pcall(function() key = p1:get():ToString() end)
                 local sid, name_label = load_sid_for_controller(c, k)
                 if is_blank_id(key) then
+                    -- The client's own key is blank ("TESTING UID": no platform
+                    -- identity), and letting the game run that load first hands
+                    -- the player a blank record before the corrected re-load a
+                    -- tick later; the client kept the blank one (fresh character,
+                    -- starting items, quickbar desync) while the server pawn held
+                    -- the real save (second hosted session, 2026-09-07). Rewrite
+                    -- the parameter so the game's first load already carries the
+                    -- synthetic id. The scheduled recovery below still runs as the
+                    -- proven fallback; with a successful rewrite it re-loads the
+                    -- same record, which is harmless.
+                    if isSynth(sid) then
+                        local ok_set = pcall(function() p1:set(sid) end)
+                        local after = param_string(p1)
+                        local log_key = tostring(k) .. ":" .. tostring(sid) .. ":rewrite"
+                        if not recovery_log[log_key] then
+                            recovery_log[log_key] = true
+                            log("BeginLoadData key rewritten [" .. tostring(k) ..
+                                "] key=" .. tostring(key) ..
+                                " -> " .. tostring(sid) ..
+                                " ok=" .. tostring(ok_set) ..
+                                " after=" .. tostring(after) ..
+                                " landed=" .. tostring(after == sid))
+                        end
+                    end
                     if recovered_load_already(k, sid) then
                         reject_remote_identity(c, k, key, sid, "blank-load-key", true)
                         mark_invalid_identity_recovered(k, sid, name_label)
@@ -2278,6 +2323,7 @@ SP.every("host-boot", 1000, 0, function()
     local gi = FindFirstOf("BP_SkyGameInstance_C")
     if not (gi and gi:IsValid()) then return end
     hosted = true
+    runtime_hosted = true
 
     -- world: name the persistent save slot BEFORE hosting. HostGame's
     -- save-system init loads <WorldSaveName>.sav or creates it.
