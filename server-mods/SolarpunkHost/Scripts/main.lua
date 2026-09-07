@@ -2323,7 +2323,6 @@ SP.every("host-boot", 1000, 0, function()
     local gi = FindFirstOf("BP_SkyGameInstance_C")
     if not (gi and gi:IsValid()) then return end
     hosted = true
-    runtime_hosted = true
 
     -- world: name the persistent save slot BEFORE hosting. HostGame's
     -- save-system init loads <WorldSaveName>.sav or creates it.
@@ -2356,6 +2355,7 @@ SP.every("host-boot", 1000, 0, function()
 
     pcall(function() gi:HostGame() end)
     log("HostGame() called (world=" .. WORLD_NAME .. ")")
+    runtime_hosted = true
     write_host_status(true, "hostgame_called")
 end)
 
