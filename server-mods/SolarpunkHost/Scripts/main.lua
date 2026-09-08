@@ -2043,6 +2043,8 @@ end
 -- closed on bad load keys and stamps SP.transition so Roster/Chat/Auth keep
 -- their hands off the controller until the join transition settles.
 
+local SR = {}
+do
 -- ---------------------------------------------------------------------------
 -- Answer the client's own blank-key load from the player's record.
 --
@@ -2223,6 +2225,44 @@ local function repair_saved_player_ids(why)
     end
     return fixed
 end
+-- The game's follow-up after a load finds a record by the player's last seen
+-- name, not by id, so a blank record carrying the same name as the player's
+-- real one wins every time and binds the client to its inventory (seen
+-- 2026-09-08: the blank record's inventory id came back on every join no
+-- matter what the id lookup returned). Once a player has a record under a
+-- synthetic id, any other record with a blank id and the same name is a decoy:
+-- retire it (id and name) so it can never match again.
+local SAVED_PLAYER_NAME_FIELD = "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"
+local retire_log = {}
+local function read_saved_player_name(e)
+    return read_saved_player_id(e, SAVED_PLAYER_NAME_FIELD)
+end
+local function retire_blank_decoys(arr, n, field, own_i, sid, why)
+    local own_name = read_saved_player_name(arr[own_i])
+    if not own_name or own_name == "" then return 0 end
+    local count = 0
+    for i = 1, n do
+        if i ~= own_i then
+            local e
+            if pcall(function() e = arr[i] end) and e ~= nil then
+                local id = read_saved_player_id(e, field)
+                if is_blank_id(id) and read_saved_player_name(e) == own_name then
+                    local ok_id = write_saved_player_id(e, field, tostring(id) .. "#retired" .. tostring(i))
+                    local ok_nm = write_saved_player_id(e, SAVED_PLAYER_NAME_FIELD, "#retired")
+                    count = count + 1
+                    local key = tostring(sid) .. ":" .. tostring(i)
+                    if not retire_log[key] then
+                        retire_log[key] = true
+                        log("saved record decoy retired [" .. tostring(i) .. "] id=" .. tostring(id) ..
+                            " name=" .. tostring(own_name) .. " for sid=" .. tostring(sid) ..
+                            " ok=" .. tostring(ok_id and ok_nm) .. " why=" .. tostring(why or ""))
+                    end
+                end
+            end
+        end
+    end
+    return count
+end
 local function swap_saved_player_key(k, sid, blank_key)
     restore_stale_key_swaps(0)
     if isSynth(sid) then known_sids[sid] = true end
@@ -2268,6 +2308,15 @@ local function swap_saved_player_key(k, sid, blank_key)
         return false
     end
     pcall(align_saved_record_inventory, arr[own_i], sid, k)
+    pcall(retire_blank_decoys, arr, n, field, own_i, sid, "pre-swap")
+    blank_i = nil
+    for i = 1, n do
+        local e
+        if pcall(function() e = arr[i] end) and e ~= nil and read_saved_player_id(e, field) == blank_key then
+            blank_i = i
+            break
+        end
+    end
     local parked = blank_key .. "#parked"
     local ok_blank = true
     if blank_i then ok_blank = write_saved_player_id(arr[blank_i], field, parked) end
@@ -2286,6 +2335,18 @@ local function swap_saved_player_key(k, sid, blank_key)
         " answers key=" .. blank_key .. " record=" .. tostring(own_i) .. "/" .. tostring(n) ..
         " parked=" .. tostring(blank_i ~= nil))
     return true
+end
+    SR.swap_saved_player_key = swap_saved_player_key
+    SR.restore_stale_key_swaps = restore_stale_key_swaps
+    SR.repair_saved_player_ids = repair_saved_player_ids
+    SR.saved_players_array = saved_players_array
+    SR.saved_player_id_field = saved_player_id_field
+    SR.saved_player_inv_field = saved_player_inv_field
+    SR.read_saved_player_id = read_saved_player_id
+    SR.retire_blank_decoys = retire_blank_decoys
+    SR.align_saved_record_inventory = align_saved_record_inventory
+    SR.known_sids = known_sids
+    SR.pending_key_swaps = pending_key_swaps
 end
 
 local BLD_CLASS = "/Game/Code/Character/BP_MainPlayerController.BP_MainPlayerController_C"
@@ -2311,7 +2372,7 @@ local function try_install_bld_hook()
                     -- game still ran the load with the blank key). The corrected load is
                     -- re-issued from the tick below; see the dead-end list in the
                     -- keying section.
-                    if swap_saved_player_key(k, sid, key) then
+                    if SR.swap_saved_player_key(k, sid, key) then
                         -- The game's own load now returns the player's record, and
                         -- so does its follow-up lookup by the same blank key ~30 ms
                         -- later, which is what binds the client's inventory id. A
@@ -2442,7 +2503,7 @@ local function try_install_save_player_hook()
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
                 restore_saved_player_key(k, "pre-save")
-                repair_saved_player_ids("pre-save")
+                SR.repair_saved_player_ids("pre-save")
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
                     local recovered_sid = invalid_identity_recovered_sid(k)
@@ -2752,34 +2813,44 @@ local function dump_save_manager_layout()
             return
         end
         dump_object_layout(sm, "SaveManager", 1)
-        local arr = saved_players_array()
+        local arr = SR.saved_players_array()
         if not arr then return end
         local n = 0
         pcall(function() n = arr:GetArrayNum() end)
         for i = 1, n do
             pcall(function()
                 local e = arr[i]
-                local idf = saved_player_id_field(e)
-                local invf = saved_player_inv_field(e)
-                local id = idf and read_saved_player_id(e, idf)
+                local idf = SR.saved_player_id_field(e)
+                local invf = SR.saved_player_inv_field(e)
+                local id = idf and SR.read_saved_player_id(e, idf)
                 if isSynth(id) then
-                    known_sids[id] = true
-                    align_saved_record_inventory(e, id, "boot")
+                    SR.known_sids[id] = true
+                    SR.align_saved_record_inventory(e, id, "boot")
                 end
-                log("SavedPlayers[" .. i .. "] id=" .. tostring(idf and read_saved_player_id(e, idf)) ..
+                log("SavedPlayers[" .. i .. "] id=" .. tostring(idf and SR.read_saved_player_id(e, idf)) ..
                     " inv=" .. tostring(invf and read_guid_prop(e, invf)) ..
                     " name=" .. tostring(describe_value(e["LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"])))
             end)
         end
-        pcall(repair_saved_player_ids, "boot")
+        pcall(SR.repair_saved_player_ids, "boot")
+        pcall(function()
+            for i = 1, n do
+                local e = arr[i]
+                local idf = SR.saved_player_id_field(e)
+                local id = idf and SR.read_saved_player_id(e, idf)
+                if isSynth(id) and not id:find("#", 1, true) then
+                    SR.retire_blank_decoys(arr, n, idf, i, id, "boot")
+                end
+            end
+        end)
     end)
 end
 
 -- If the BeginLoadData post-hook ever fails to run, put swapped records back.
 SP.every("host-key-swap-guard", 250, 100, function()
     if not hosted then return end
-    pcall(restore_stale_key_swaps, 2)
-    if next(pending_key_swaps) == nil then pcall(repair_saved_player_ids, "tick") end
+    pcall(SR.restore_stale_key_swaps, 2)
+    if next(SR.pending_key_swaps) == nil then pcall(SR.repair_saved_player_ids, "tick") end
 end)
 
 SP.every("host-save-normalize", 15000, 7000, function()
