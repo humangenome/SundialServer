@@ -2264,7 +2264,22 @@ local function try_install_bld_hook()
                     -- game still ran the load with the blank key). The corrected load is
                     -- re-issued from the tick below; see the dead-end list in the
                     -- keying section.
-                    swap_saved_player_key(k, sid, key)
+                    if swap_saved_player_key(k, sid, key) then
+                        -- The game's own load now returns the player's record, and
+                        -- so does its follow-up lookup by the same blank key ~30 ms
+                        -- later, which is what binds the client's inventory id. A
+                        -- re-issued load would have to undo the swap first and the
+                        -- follow-up then found the blank record instead (seen
+                        -- 2026-09-08: client bound to the blank record's inventory).
+                        -- So: no re-issue. The swap is undone at the first save or
+                        -- after two seconds, whichever comes first.
+                        loaded_sid[k] = sid
+                        load_reissued_sid[k] = sid
+                        pending[k] = nil
+                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        stamp_unique_player_id(c, sid, "begin-load-swapped")
+                        return
+                    end
                     if recovered_load_already(k, sid) then
                         reject_remote_identity(c, k, key, sid, "blank-load-key", true)
                         mark_invalid_identity_recovered(k, sid, name_label)
@@ -2315,7 +2330,6 @@ local function try_install_bld_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                restore_saved_player_key(k, "post-hook")
                 mark_controller_seen(k)
                 SP.transition[k] = os.time()
             end)
@@ -2380,6 +2394,7 @@ local function try_install_save_player_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
+                restore_saved_player_key(k, "pre-save")
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
                     local recovered_sid = invalid_identity_recovered_sid(k)
@@ -2711,7 +2726,7 @@ end
 -- If the BeginLoadData post-hook ever fails to run, put swapped records back.
 SP.every("host-key-swap-guard", 250, 100, function()
     if not hosted then return end
-    pcall(restore_stale_key_swaps, 0)
+    pcall(restore_stale_key_swaps, 2)
 end)
 
 SP.every("host-save-normalize", 15000, 7000, function()
