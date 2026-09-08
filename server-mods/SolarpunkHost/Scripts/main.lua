@@ -1921,6 +1921,7 @@ local function schedule_begin_load_recovery(c, k, key, sid, name_label, reason)
     return true
 end
 
+local restore_saved_player_key -- defined with the record swap below
 local function drive_pending_begin_load(c, k)
     local job = pending[k]
     if not job then return end
@@ -1932,6 +1933,11 @@ local function drive_pending_begin_load(c, k)
     end
     loaded_sid[k] = job.sid
     load_reissued_sid[k] = job.sid
+    -- The swap made for the client's own blank-key call must be undone before
+    -- this load, or the lookup by synthetic id finds nothing and the game
+    -- makes a NEW record under it (seen 2026-09-08: the post-hook did not run,
+    -- the guard was a second away, and this load ran 128 ms after the swap).
+    restore_saved_player_key(k, "pre-recovery")
     stamp_persistence_ids(c, job.sid, "begin-load-recovery")
     local ok, err = pcall(function() c:BeginLoadData(job.sid) end)
     log("BeginLoadData recovered [" .. tostring(k) ..
@@ -2094,7 +2100,7 @@ local function write_saved_player_id(e, field, value)
     local ok = pcall(function() e[field] = value end)
     return ok and read_saved_player_id(e, field) == value
 end
-local function restore_saved_player_key(k, why)
+restore_saved_player_key = function(k, why)
     local job = pending_key_swaps[k]
     if not job then return end
     pending_key_swaps[k] = nil
@@ -2141,7 +2147,17 @@ local function swap_saved_player_key(k, sid, blank_key)
             if field then
                 local id = read_saved_player_id(e, field)
                 if id == sid then
-                    own_i = own_i or i
+                    if own_i then
+                        -- A second record under the same id can only come from a
+                        -- load that ran while the swap was in place. The first
+                        -- record is the player's; the extra is retired so neither
+                        -- loads nor saves can ever match it again.
+                        local retired = write_saved_player_id(e, field, sid .. "#dup" .. tostring(i))
+                        log("BeginLoadData duplicate record retired sid=" .. tostring(sid) ..
+                            " index=" .. tostring(i) .. " ok=" .. tostring(retired))
+                    else
+                        own_i = i
+                    end
                 elseif id == blank_key then
                     blank_i = blank_i or i
                 end
@@ -2629,9 +2645,9 @@ local function dump_save_manager_layout()
 end
 
 -- If the BeginLoadData post-hook ever fails to run, put swapped records back.
-SP.every("host-key-swap-guard", 1000, 500, function()
+SP.every("host-key-swap-guard", 250, 100, function()
     if not hosted then return end
-    pcall(restore_stale_key_swaps, 1)
+    pcall(restore_stale_key_swaps, 0)
 end)
 
 SP.every("host-save-normalize", 15000, 7000, function()
