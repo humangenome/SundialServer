@@ -2178,8 +2178,55 @@ local function align_saved_record_inventory(e, sid, k)
     end
     return ok
 end
+-- The game's save path overwrites the whole record with the struct the client
+-- holds, and that struct carries the blank id it was handed while the swap was
+-- in place. So after the first save the player's record reads as a second
+-- blank record and the next join finds the wrong one (seen 2026-09-08: first
+-- login fine, second frozen). A record with a blank id whose inventory id is a
+-- known player's stable inventory id is that player's record: put the id back.
+local known_sids = {}
+local repair_log = {}
+local function repair_saved_player_ids(why)
+    local arr = saved_players_array()
+    if not arr then return 0 end
+    local n = 0
+    if not pcall(function() n = arr:GetArrayNum() end) then return 0 end
+    local fixed = 0
+    for i = 1, n do
+        local e
+        if pcall(function() e = arr[i] end) and e ~= nil then
+            local idf = saved_player_id_field(e)
+            local invf = saved_player_inv_field(e)
+            if idf and invf then
+                local id = read_saved_player_id(e, idf)
+                if is_blank_id(id) then
+                    local inv = normalize_hex32(read_guid_prop(e, invf))
+                    if inv then
+                        for sid in pairs(known_sids) do
+                            if normalize_hex32(stable_inventory_id(sid)) == inv then
+                                if write_saved_player_id(e, idf, sid) then
+                                    fixed = fixed + 1
+                                    local key = tostring(sid) .. ":" .. tostring(i)
+                                    if not repair_log[key] then
+                                        repair_log[key] = true
+                                        log("saved record id repaired [" .. tostring(i) .. "] " ..
+                                            tostring(id) .. " -> " .. tostring(sid) .. " why=" .. tostring(why or ""))
+                                    end
+                                end
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return fixed
+end
 local function swap_saved_player_key(k, sid, blank_key)
     restore_stale_key_swaps(0)
+    if isSynth(sid) then known_sids[sid] = true end
+    repair_saved_player_ids("pre-swap")
     if not isSynth(sid) then return false end
     blank_key = tostring(blank_key or "")
     local arr = saved_players_array()
@@ -2395,6 +2442,7 @@ local function try_install_save_player_hook()
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
                 restore_saved_player_key(k, "pre-save")
+                repair_saved_player_ids("pre-save")
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
                     local recovered_sid = invalid_identity_recovered_sid(k)
@@ -2714,12 +2762,16 @@ local function dump_save_manager_layout()
                 local idf = saved_player_id_field(e)
                 local invf = saved_player_inv_field(e)
                 local id = idf and read_saved_player_id(e, idf)
-                if isSynth(id) then align_saved_record_inventory(e, id, "boot") end
+                if isSynth(id) then
+                    known_sids[id] = true
+                    align_saved_record_inventory(e, id, "boot")
+                end
                 log("SavedPlayers[" .. i .. "] id=" .. tostring(idf and read_saved_player_id(e, idf)) ..
                     " inv=" .. tostring(invf and read_guid_prop(e, invf)) ..
                     " name=" .. tostring(describe_value(e["LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"])))
             end)
         end
+        pcall(repair_saved_player_ids, "boot")
     end)
 end
 
@@ -2727,6 +2779,7 @@ end
 SP.every("host-key-swap-guard", 250, 100, function()
     if not hosted then return end
     pcall(restore_stale_key_swaps, 2)
+    if next(pending_key_swaps) == nil then pcall(repair_saved_player_ids, "tick") end
 end)
 
 SP.every("host-save-normalize", 15000, 7000, function()
