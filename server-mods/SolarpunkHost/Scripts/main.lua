@@ -2131,6 +2131,53 @@ local function restore_stale_key_swaps(max_age)
         if now - (job.at or now) >= (max_age or 1) then restore_saved_player_key(k, "stale-guard") end
     end
 end
+-- The record's inventory id must be the id the inventory is actually saved and
+-- stamped under (stable_inventory_id), or the game's own load re-keys the pawn
+-- to whatever the record says and the client ends up bound to an inventory
+-- that holds nothing: new inventory, items locked in the hotbar, while the
+-- server pawn had the right items a moment earlier (seen 2026-09-08).
+local SAVED_PLAYER_INV_FIELD = "InventoryID_60_9F40B03D435683709B5A9CA6D58906AE"
+local saved_player_inv_field_cache = nil
+local function saved_player_inv_field(e)
+    if saved_player_inv_field_cache then return saved_player_inv_field_cache end
+    local v
+    if pcall(function() v = e[SAVED_PLAYER_INV_FIELD] end) and v ~= nil then
+        saved_player_inv_field_cache = SAVED_PLAYER_INV_FIELD
+        return saved_player_inv_field_cache
+    end
+    local names = struct_property_names(e, 64)
+    if names then
+        for _, n in ipairs(names) do
+            if n:match("^InventoryID") then
+                saved_player_inv_field_cache = n
+                return n
+            end
+        end
+    end
+    return nil
+end
+local record_inv_log = {}
+local function align_saved_record_inventory(e, sid, k)
+    local want = normalize_hex32(stable_inventory_id(sid))
+    local field = saved_player_inv_field(e)
+    if not field or not want then return false end
+    local before = read_guid_prop(e, field)
+    if normalize_hex32(before) == want then return true end
+    local value
+    if pcall(function() value = e[field] end) and value ~= nil and assign_guid_value(value, want) then
+        pcall(function() e[field] = value end)
+    end
+    local after = read_guid_prop(e, field)
+    local ok = normalize_hex32(after) == want
+    local key = tostring(sid) .. ":" .. tostring(before) .. ":" .. tostring(ok)
+    if not record_inv_log[key] then
+        record_inv_log[key] = true
+        log("BeginLoadData record inventory id [" .. tostring(k) .. "] sid=" .. tostring(sid) ..
+            " before=" .. tostring(before) .. " after=" .. tostring(after) .. " want=" .. want ..
+            " ok=" .. tostring(ok))
+    end
+    return ok
+end
 local function swap_saved_player_key(k, sid, blank_key)
     restore_stale_key_swaps(0)
     if not isSynth(sid) then return false end
@@ -2173,6 +2220,7 @@ local function swap_saved_player_key(k, sid, blank_key)
         end
         return false
     end
+    pcall(align_saved_record_inventory, arr[own_i], sid, k)
     local parked = blank_key .. "#parked"
     local ok_blank = true
     if blank_i then ok_blank = write_saved_player_id(arr[blank_i], field, parked) end
@@ -2641,6 +2689,22 @@ local function dump_save_manager_layout()
             return
         end
         dump_object_layout(sm, "SaveManager", 1)
+        local arr = saved_players_array()
+        if not arr then return end
+        local n = 0
+        pcall(function() n = arr:GetArrayNum() end)
+        for i = 1, n do
+            pcall(function()
+                local e = arr[i]
+                local idf = saved_player_id_field(e)
+                local invf = saved_player_inv_field(e)
+                local id = idf and read_saved_player_id(e, idf)
+                if isSynth(id) then align_saved_record_inventory(e, id, "boot") end
+                log("SavedPlayers[" .. i .. "] id=" .. tostring(idf and read_saved_player_id(e, idf)) ..
+                    " inv=" .. tostring(invf and read_guid_prop(e, invf)) ..
+                    " name=" .. tostring(describe_value(e["LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"])))
+            end)
+        end
     end)
 end
 
