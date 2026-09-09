@@ -2856,33 +2856,45 @@ local function dump_save_manager_layout()
             -- whatever its id, would win the game's name-keyed follow-up and bind
             -- the client to a different inventory, so it is retired.
             pcall(function()
-                local primary
+                local NAME_FIELD = "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"
+                local idf
+                local primary, last_synth
                 for i = 1, n do
                     local e = arr[i]
-                    local idf = SR.saved_player_id_field(e)
-                    if idf and SR.read_saved_player_id(e, idf) == "TESTING UID" then primary = i break end
+                    idf = idf or SR.saved_player_id_field(e)
+                    local id = idf and SR.read_saved_player_id(e, idf) or ""
+                    if id == "TESTING UID" and not primary then primary = i end
+                    if isSynth(id) and not id:find("#", 1, true) then last_synth = i end
+                end
+                if not primary and last_synth then
+                    -- A world that ran the synthetic keying before has its profile
+                    -- under a synthetic id; the newest such record is the player's.
+                    local ok = SR.write_saved_player_id(arr[last_synth], idf, "TESTING UID")
+                    log("vanilla identity: promoted record [" .. last_synth .. "] to the blank profile ok=" .. tostring(ok))
+                    if ok then primary = last_synth end
                 end
                 if not primary then
-                    log("vanilla identity: no blank profile yet; the game makes one on the first join")
+                    log("vanilla identity: no profile yet; the game makes one on the first join")
                     return
                 end
-                local idf = SR.saved_player_id_field(arr[primary])
-                local name = SR.read_saved_player_id(arr[primary], "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED")
+                local name = SR.read_saved_player_id(arr[primary], NAME_FIELD)
                 local retired = 0
                 for i = 1, n do
                     if i ~= primary then
                         local e = arr[i]
-                        local nm = SR.read_saved_player_id(e, "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED")
-                        if name and name ~= "" and nm == name then
-                            local id = SR.read_saved_player_id(e, idf) or ""
+                        local id = SR.read_saved_player_id(e, idf) or ""
+                        local nm = SR.read_saved_player_id(e, NAME_FIELD) or ""
+                        -- Every record but the profile and the host's own is a
+                        -- potential decoy for some machine name: retire it.
+                        if id ~= "ERROR, BAD UNIQUE NET ID" and (nm ~= "#retired" or not id:find("#", 1, true)) then
                             local ok_id = id:find("#", 1, true) and true or SR.write_saved_player_id(e, idf, id .. "#retired" .. tostring(i))
-                            local ok_nm = SR.write_saved_player_id(e, "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED", "#retired")
+                            local ok_nm = nm == "#retired" or SR.write_saved_player_id(e, NAME_FIELD, "#retired")
                             retired = retired + 1
-                            log("vanilla identity: retired record [" .. i .. "] id=" .. id .. " ok=" .. tostring(ok_id and ok_nm))
+                            log("vanilla identity: retired record [" .. i .. "] id=" .. id .. " name=" .. nm .. " ok=" .. tostring(ok_id and ok_nm))
                         end
                     end
                 end
-                log("vanilla identity: primary record [" .. primary .. "] name=" .. tostring(name) .. " retired_by_name=" .. retired)
+                log("vanilla identity: profile record [" .. primary .. "] name=" .. tostring(name) .. " retired=" .. retired)
             end)
             return
         end
