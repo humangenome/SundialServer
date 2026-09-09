@@ -617,6 +617,20 @@ local first_seen_at = {}
 SP.invalid_identity = SP.invalid_identity or {}
 SP.machine_canonical_name = SP.machine_canonical_name or {}
 local MACHINE_ALIAS_FILE = SP_DIR and (SP_DIR .. "\\data\\machine_aliases.tsv") or nil
+-- Identity mode. "synthetic" (default) keys every remote player's save under
+-- an id derived from their name, so several players with the same blank
+-- platform id keep separate characters. "vanilla" leaves the game's own
+-- identity flow untouched: every blank-id player shares the game's single
+-- blank profile, exactly as the game behaves without this mod. Vanilla is the
+-- right mode for a one-player world where the synthetic keying is still being
+-- proven against the game's own save path. Set by a file the hoster controls:
+--   <SolarpunkServer>\data\identity-mode.txt   containing the word   vanilla
+local IDENTITY_MODE = "synthetic"
+do
+    local body = SP_DIR and read_all(SP_DIR .. "\\data\\identity-mode.txt")
+    if body and tostring(body):lower():match("vanilla") then IDENTITY_MODE = "vanilla" end
+end
+log("identity mode: " .. IDENTITY_MODE)
 
 local function crc32(s)
     local c = 0xFFFFFFFF
@@ -1999,10 +2013,10 @@ local function tick()
             mark_controller_seen(k)
             -- never touch a controller auth already kicked (dying object) or
             -- quarantined for a bad client identity.
-            if not c:IsLocalPlayerController() then
+            if IDENTITY_MODE ~= "vanilla" and not c:IsLocalPlayerController() then
                 try_recover_invalid_identity(c, k)
             end
-            if not c:IsLocalPlayerController() and not controller_blocked(k) then
+            if IDENTITY_MODE ~= "vanilla" and not c:IsLocalPlayerController() and not controller_blocked(k) then
                 local sid, name_label = load_sid_for_controller(c, k)
                 if sid then
                     stamp_persistence_ids(c, sid, "tick")
@@ -2344,6 +2358,7 @@ end
     SR.saved_player_inv_field = saved_player_inv_field
     SR.read_saved_player_id = read_saved_player_id
     SR.retire_blank_decoys = retire_blank_decoys
+    SR.write_saved_player_id = write_saved_player_id
     SR.align_saved_record_inventory = align_saved_record_inventory
     SR.known_sids = known_sids
     SR.pending_key_swaps = pending_key_swaps
@@ -2363,6 +2378,7 @@ local function try_install_bld_hook()
                 local k = akey(c)
                 mark_controller_seen(k)
                 SP.transition[k] = os.time()       -- join/load transition in flight
+                if IDENTITY_MODE == "vanilla" then return end
                 local key = ""
                 pcall(function() key = p1:get():ToString() end)
                 local sid, name_label = load_sid_for_controller(c, k)
@@ -2502,6 +2518,7 @@ local function try_install_save_player_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
+                if IDENTITY_MODE == "vanilla" then return end
                 restore_saved_player_key(k, "pre-save")
                 SR.repair_saved_player_ids("pre-save")
                 if SP.kicked[k] then return end
@@ -2555,6 +2572,7 @@ local function try_install_apply_inventory_hook()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
+                if IDENTITY_MODE == "vanilla" then return end
                 local k = akey(c)
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
@@ -2823,7 +2841,7 @@ local function dump_save_manager_layout()
                 local idf = SR.saved_player_id_field(e)
                 local invf = SR.saved_player_inv_field(e)
                 local id = idf and SR.read_saved_player_id(e, idf)
-                if isSynth(id) then
+                if IDENTITY_MODE ~= "vanilla" and isSynth(id) then
                     SR.known_sids[id] = true
                     SR.align_saved_record_inventory(e, id, "boot")
                 end
@@ -2831,6 +2849,42 @@ local function dump_save_manager_layout()
                     " inv=" .. tostring(invf and read_guid_prop(e, invf)) ..
                     " name=" .. tostring(describe_value(e["LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"])))
             end)
+        end
+        if IDENTITY_MODE == "vanilla" then
+            -- One blank profile, the game's own. The first record under the exact
+            -- blank id is it; any other record carrying the same last seen name,
+            -- whatever its id, would win the game's name-keyed follow-up and bind
+            -- the client to a different inventory, so it is retired.
+            pcall(function()
+                local primary
+                for i = 1, n do
+                    local e = arr[i]
+                    local idf = SR.saved_player_id_field(e)
+                    if idf and SR.read_saved_player_id(e, idf) == "TESTING UID" then primary = i break end
+                end
+                if not primary then
+                    log("vanilla identity: no blank profile yet; the game makes one on the first join")
+                    return
+                end
+                local idf = SR.saved_player_id_field(arr[primary])
+                local name = SR.read_saved_player_id(arr[primary], "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED")
+                local retired = 0
+                for i = 1, n do
+                    if i ~= primary then
+                        local e = arr[i]
+                        local nm = SR.read_saved_player_id(e, "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED")
+                        if name and name ~= "" and nm == name then
+                            local id = SR.read_saved_player_id(e, idf) or ""
+                            local ok_id = id:find("#", 1, true) and true or SR.write_saved_player_id(e, idf, id .. "#retired" .. tostring(i))
+                            local ok_nm = SR.write_saved_player_id(e, "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED", "#retired")
+                            retired = retired + 1
+                            log("vanilla identity: retired record [" .. i .. "] id=" .. id .. " ok=" .. tostring(ok_id and ok_nm))
+                        end
+                    end
+                end
+                log("vanilla identity: primary record [" .. primary .. "] name=" .. tostring(name) .. " retired_by_name=" .. retired)
+            end)
+            return
         end
         pcall(SR.repair_saved_player_ids, "boot")
         pcall(function()
@@ -2850,7 +2904,6 @@ end
 SP.every("host-key-swap-guard", 250, 100, function()
     if not hosted then return end
     pcall(SR.restore_stale_key_swaps, 2)
-    if next(SR.pending_key_swaps) == nil then pcall(SR.repair_saved_player_ids, "tick") end
 end)
 
 SP.every("host-save-normalize", 15000, 7000, function()
