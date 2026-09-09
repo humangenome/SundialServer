@@ -2831,6 +2831,37 @@ local function dump_save_manager_layout()
             return
         end
         dump_object_layout(sm, "SaveManager", 1)
+        -- The game keeps a name-keyed map in the save (OnlinePlayerNames); its
+        -- entries decide what a post-load follow-up binds the client to. Dump it.
+        pcall(function()
+            local save = sm.CachedSave
+            if not validish(save) then return end
+            local m = save.OnlinePlayerNames
+            if m == nil then log("OnlinePlayerNames: nil") return end
+            local count = 0
+            local ok, err = pcall(function()
+                m:ForEach(function(k, v)
+                    count = count + 1
+                    if count > 24 then return end
+                    local kv, vv = k, v
+                    pcall(function() kv = k:get() end)
+                    pcall(function() vv = v:get() end)
+                    local vd = describe_value(vv)
+                    local names = struct_property_names(vv, 24)
+                    if names then
+                        local parts = {}
+                        for _, fn in ipairs(names) do
+                            local x
+                            pcall(function() x = vv[fn] end)
+                            parts[#parts + 1] = fn .. "=" .. describe_value(x)
+                        end
+                        vd = "{" .. table.concat(parts, ", ") .. "}"
+                    end
+                    log("OnlinePlayerNames[" .. describe_value(kv) .. "] = " .. vd)
+                end)
+            end)
+            log("OnlinePlayerNames: entries=" .. tostring(count) .. " ok=" .. tostring(ok) .. (err and (" err=" .. tostring(err)) or ""))
+        end)
         local arr = SR.saved_players_array()
         if not arr then return end
         local n = 0
