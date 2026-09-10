@@ -2402,6 +2402,40 @@ end
     SR.pending_key_swaps = pending_key_swaps
 end
 
+-- One-shot manual repair, driven by a file the hoster drops in data\:
+--   record-restore.txt   containing   <index> <name> <sid>
+-- Sets that record's id and last seen name, aligns its inventory id to the
+-- sid's stable inventory id, then deletes the file. For a record an earlier
+-- build retired by mistake.
+do
+    local path = SP_DIR and (SP_DIR .. "\\data\\record-restore.txt")
+    local body = path and read_all(path)
+    if body then
+        local idx, nm, sid = tostring(body):match("^%s*(%d+)%s+(%S+)%s+(%d+)")
+        local done = false
+        SP.every("host-record-restore", 1000, 9000, function()
+            if done or not hosted then return end
+            local arr = SR.saved_players_array()
+            if not arr then return end
+            done = true
+            local i = tonumber(idx)
+            local e
+            if not (i and pcall(function() e = arr[i] end) and e ~= nil) then
+                log("record restore: index " .. tostring(idx) .. " not found")
+                os.remove(path)
+                return
+            end
+            local idf = SR.saved_player_id_field(e)
+            local ok_id = idf and SR.write_saved_player_id(e, idf, sid)
+            local ok_nm = SR.write_saved_player_id(e, "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED", nm)
+            SR.known_sids[sid] = true
+            local ok_inv = SR.align_saved_record_inventory(e, sid, "restore")
+            log("record restore [" .. i .. "] name=" .. nm .. " sid=" .. sid ..
+                " id_ok=" .. tostring(ok_id) .. " name_ok=" .. tostring(ok_nm) .. " inv_ok=" .. tostring(ok_inv))
+            os.remove(path)
+        end)
+    end
+end
 SR_current_name = function(k)
     local cs = SP.controllers and SP.controllers()
     if not cs then return nil end
