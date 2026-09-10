@@ -1403,6 +1403,10 @@ local strict_inventory_id_fields = {
     "InvenotryIdString", "InvenotryUniqueID", "InvenotryUniqueId",
 }
 local playerdata_fields = {
+    -- The saved-record struct's id member is Blueprint-mangled; the game's own
+    -- save path reads exactly this one (seen 2026-09-10: every stamp reported
+    -- table_ok while the game kept saving "ID from Playerdata: TESTING UID").
+    "PlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363",
     "UniquePlayerID", "UniquePlayerId", "PlayerID", "PlayerId",
     "PlayerIDString", "PlayerIdString", "PlayerdataID", "PlayerDataID",
     "PlayerdataId", "PlayerDataId", "UniqueID", "UniqueId",
@@ -1493,7 +1497,15 @@ local function stamp_playerdata_param(param, sid, why)
     if did then ok_struct = pcall(function() param:set(s) end) end
     local after = playerdata_param_id(s)
     local ok_table = false
-    if after ~= sid then ok_table = pcall(function() param:set(patch) end) end
+    if after ~= sid then
+        ok_table = pcall(function() param:set(patch) end)
+        -- Read the parameter back through a fresh get(): the struct handle
+        -- above may be a copy, and what matters is what the callee will see.
+        pcall(function()
+            local s2 = param:get()
+            if validish(s2) then after = playerdata_param_id(s2) end
+        end)
+    end
     local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
     if not field_stamp_log[key] then
         field_stamp_log[key] = true
