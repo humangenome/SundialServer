@@ -2070,6 +2070,7 @@ end
 -- their hands off the controller until the join transition settles.
 
 local SR = {}
+local SR_current_name = nil -- set below the hook section; name for a controller key
 do
 -- ---------------------------------------------------------------------------
 -- Answer the client's own blank-key load from the player's record.
@@ -2326,6 +2327,31 @@ local function swap_saved_player_key(k, sid, blank_key)
     end
     local log_key = tostring(k) .. ":" .. tostring(sid)
     if not own_i then
+        -- No record under this id: the game's write-back may hold the profile
+        -- under the blank id with the player's name. Adopt the newest such
+        -- record rather than letting the game make an empty one.
+        local NAME_FIELD = "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"
+        local want_name = nil
+        pcall(function() want_name = SR_current_name and SR_current_name(k) end)
+        for i = n, 1, -1 do
+            local e
+            if pcall(function() e = arr[i] end) and e ~= nil and field then
+                local id = read_saved_player_id(e, field)
+                local nm = read_saved_player_id(e, NAME_FIELD) or ""
+                if id == blank_key and nm ~= "" and (want_name == nil or nm == want_name) then
+                    if write_saved_player_id(e, field, sid) then
+                        known_sids[sid] = true
+                        pcall(align_saved_record_inventory, e, sid, k)
+                        own_i = i
+                        log("BeginLoadData record adopted [" .. tostring(k) .. "] index=" .. i ..
+                            " name=" .. nm .. " -> sid=" .. tostring(sid))
+                    end
+                    break
+                end
+            end
+        end
+    end
+    if not own_i then
         if not key_swap_log[log_key .. ":none"] then
             key_swap_log[log_key .. ":none"] = true
             log("BeginLoadData record swap: no saved record for sid=" .. tostring(sid) ..
@@ -2376,6 +2402,14 @@ end
     SR.pending_key_swaps = pending_key_swaps
 end
 
+SR_current_name = function(k)
+    local cs = SP.controllers and SP.controllers()
+    if not cs then return nil end
+    for _, c in ipairs(cs) do
+        if c and c:IsValid() and akey(c) == k then return pname(c) end
+    end
+    return nil
+end
 local BLD_CLASS = "/Game/Code/Character/BP_MainPlayerController.BP_MainPlayerController_C"
 local ld_hooked, ld_tries = false, 0
 local function try_install_bld_hook()
@@ -2942,14 +2976,45 @@ local function dump_save_manager_layout()
             return
         end
         pcall(SR.repair_saved_player_ids, "boot")
+        -- A record under the exact blank id that carries a name is the game's
+        -- write-back of a player's LIVE profile from the last session (the
+        -- save path copies the client's struct, blank id and all). When no
+        -- record under a synthetic id shares that name, this one IS the
+        -- player's profile: give it the synthetic id for the name it carries
+        -- and align its inventory id. Only when a synthetic sibling exists is
+        -- it a decoy.
         pcall(function()
+            local NAME_FIELD = "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"
+            local synth_by_name = {}
             for i = 1, n do
                 local e = arr[i]
                 local idf = SR.saved_player_id_field(e)
-                local id = idf and SR.read_saved_player_id(e, idf)
+                local id = idf and SR.read_saved_player_id(e, idf) or ""
                 if isSynth(id) and not id:find("#", 1, true) then
-                    SR.retire_blank_decoys(arr, n, idf, i, id, "boot")
+                    synth_by_name[SR.read_saved_player_id(e, NAME_FIELD) or ""] = i
                 end
+            end
+            for i = 1, n do
+                local e = arr[i]
+                local idf = SR.saved_player_id_field(e)
+                local id = idf and SR.read_saved_player_id(e, idf) or ""
+                local nm = SR.read_saved_player_id(e, NAME_FIELD) or ""
+                if id == "TESTING UID" and nm ~= "" and not synth_by_name[nm] then
+                    local sid = synthId(nm)
+                    local ok = SR.write_saved_player_id(e, idf, sid)
+                    if ok then
+                        SR.known_sids[sid] = true
+                        SR.align_saved_record_inventory(e, sid, "boot-adopt")
+                        synth_by_name[nm] = i
+                    end
+                    log("saved record adopted [" .. i .. "] name=" .. nm .. " -> sid=" .. sid .. " ok=" .. tostring(ok))
+                end
+            end
+            for nm, i in pairs(synth_by_name) do
+                local e = arr[i]
+                local idf = SR.saved_player_id_field(e)
+                local id = idf and SR.read_saved_player_id(e, idf)
+                if isSynth(id) then SR.retire_blank_decoys(arr, n, idf, i, id, "boot") end
             end
         end)
     end)
