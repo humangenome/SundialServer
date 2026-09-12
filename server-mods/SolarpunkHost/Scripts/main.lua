@@ -483,6 +483,15 @@ local function try_install_savemgr_hooks()
 end
 
 local mirror_log = {}
+-- When the game's active slot file last changed content, as seen by the
+-- mirror. The game autosaves on its own every ~150 s (each one logs "Added N
+-- sek of Playtime" and duplicates the save object on an async path); a forced
+-- save landing a second after one of those crashed the game inside its own
+-- save subsystem on 2026-09-11 (null deref, no player online). The forced
+-- save is only a floor for a game that has stopped saving, so it yields
+-- whenever the slot file changed recently.
+local last_world_change_at = 0
+local last_world_bytes = nil
 local function latest_relevant_save_name()
     if not SAVE_GAMES_DIR then return nil end
     local p = io.popen('dir /b /a-d /o-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
@@ -524,6 +533,10 @@ local function mirror_active_world_save(reason)
     local dst = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
     local data = read_all(src)
     if not data or #data == 0 then return false end
+    if data ~= last_world_bytes then
+        last_world_bytes = data
+        last_world_change_at = os.time()
+    end
     local tmp = dst .. ".tmp"
     local f = io.open(tmp, "wb")
     if not f then return false end
@@ -2798,9 +2811,21 @@ SP.every("host-netid", 250, 0, function()
 end)
 
 -- forced world save cadence (the game autosaves too; this is the floor)
+local periodic_skip_logged = false
 SP.every("host-save", SAVE_INTERVAL_S * 1000, 2000, function()
     if not hosted then return end
     enforce_world_slot_runtime("periodic")
+    -- The game saved on its own recently: do not stack a second save on top
+    -- of its async save path. The floor only fires after ten quiet minutes.
+    if last_world_change_at > 0 and os.time() - last_world_change_at < 600 then
+        if not periodic_skip_logged then
+            periodic_skip_logged = true
+            log("periodic SaveToDisk yielding: the game saved " ..
+                tostring(os.time() - last_world_change_at) .. " s ago (logged once)")
+        end
+        normalize_save_games_dir("periodic")
+        return
+    end
     local sm = FindFirstOf("BPC_SaveManager_C")
     if sm and sm:IsValid() then
         local ok = pcall(function() sm:SaveToDisk() end)
