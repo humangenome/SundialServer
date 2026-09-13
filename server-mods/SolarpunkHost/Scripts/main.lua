@@ -27,8 +27,9 @@
 --
 -- CONFIG (SolarpunkServer\appsettings.json, panel-written):
 --   "WorldName": "<name>"        world save slot. Default "World1".
---   "SaveIntervalSeconds": 300   forced SaveToDisk cadence (the game's own
---                                autosave still runs; this is the floor).
+--   "SaveIntervalSeconds": 300   cadence of the slot re-pin sweep. The game
+--                                saves itself every ~150 s; since 0.1.89 the
+--                                host never forces a SaveToDisk of its own.
 --
 -- STATUS (SolarpunkServer\.solarpunk-host-status, key=value lines):
 --   hosting=0|1, world=<name>, updated=<unix>, reason=<short>
@@ -638,10 +639,18 @@ local MACHINE_ALIAS_FILE = SP_DIR and (SP_DIR .. "\\data\\machine_aliases.tsv") 
 -- right mode for a one-player world where the synthetic keying is still being
 -- proven against the game's own save path. Set by a file the hoster controls:
 --   <SolarpunkServer>\data\identity-mode.txt   containing the word   vanilla
-local IDENTITY_MODE = "synthetic"
+-- 0.1.89: vanilla is the only mode. The synthetic keying needed string
+-- writes into the game's saved records, and a string the mod loader builds
+-- is not one the game can later reallocate (two join crashes, 2026-09-13).
+-- The file is still read so a hoster who set it gets told it no longer
+-- switches anything.
+local IDENTITY_MODE = "vanilla"
 do
     local body = SP_DIR and read_all(SP_DIR .. "\\data\\identity-mode.txt")
-    if body and tostring(body):lower():match("vanilla") then IDENTITY_MODE = "vanilla" end
+    local asked = body and tostring(body):match("%S+") or nil
+    if asked and asked:lower() ~= "vanilla" then
+        log("identity mode: '" .. asked .. "' in data\\identity-mode.txt is retired since 0.1.89; running vanilla")
+    end
 end
 log("identity mode: " .. IDENTITY_MODE)
 
@@ -1193,24 +1202,12 @@ local function struct_field_string(s, field)
     return tostring(v)
 end
 local function set_struct_string_fields(s, fields, value, label, only_blank)
-    if not validish(s) then return false end
-    local did = false
-    for _, field in ipairs(fields) do
-        local before = struct_field_string(s, field)
-        if (not only_blank or is_blank_id(before)) and tostring(before or "") ~= tostring(value) then
-            local ok = pcall(function() s[field] = value end)
-            local after = struct_field_string(s, field)
-            if ok and after == tostring(value) then
-                local key = label .. "." .. field .. "=" .. tostring(value)
-                if not field_stamp_log[key] then
-                    field_stamp_log[key] = true
-                    log(label .. "." .. field .. "=" .. tostring(after) .. " struct=true")
-                end
-                did = true
-            end
-        end
-    end
-    return did
+    -- Retired 0.1.89. A string assigned into a game struct from Lua is built
+    -- by the mod loader; the game's next assignment to that member then
+    -- reallocates a block it does not own ("Attempt to realloc an
+    -- unrecognized block", two join crashes on 2026-09-13). The only writes
+    -- left are numeric GUID members and ImportText on UObject properties.
+    return false
 end
 local function prop_name(prop)
     local name
@@ -1307,9 +1304,6 @@ local function set_struct_guid_fields(s, fields, value, label, only_blank)
             if ok_get and assign_guid_value(current, value) then
                 ok = pcall(function() s[field] = current end)
             end
-            if not ok then
-                ok = pcall(function() s[field] = value end)
-            end
             local after = struct_field_guid(s, field) or struct_field_string(s, field)
             if ok and normalize_hex32(after) == normalize_hex32(value) then
                 local key = label .. "." .. field .. "=" .. tostring(value) .. ".struct-guid"
@@ -1361,46 +1355,8 @@ local function is_player_id_field(name)
     return is_player_identity_field_name(name)
 end
 local function set_struct_matching_string_props(s, predicate, value, label, only_blank)
-    if not ENABLE_DYNAMIC_FIELD_SCANS then return false end
-    if not validish(s) then return false end
-    local did = false
-    local logged_any = false
-    local ok_iter = pcall(function()
-        s:ForEachProperty(function(prop)
-            local pname = prop_name(prop)
-            local kind = prop_kind(prop)
-            if pname and not logged_any then
-                logged_any = true
-                log(label .. ".field-scan first=" .. pname .. " kind=" .. kind)
-            end
-            if pname and (kind == "Str" or kind == "Name" or kind == "Text") and predicate(pname, kind) then
-                local before = struct_field_string(s, pname)
-                if (not only_blank or is_blank_id(before)) and tostring(before or "") ~= tostring(value) then
-                    local ok = pcall(function() s[pname] = value end)
-                    local after = struct_field_string(s, pname)
-                    if ok and after == tostring(value) then
-                        local key = label .. "." .. pname .. "=" .. tostring(value)
-                        if not field_stamp_log[key] then
-                            field_stamp_log[key] = true
-                            log(label .. "." .. pname .. "=" .. tostring(after) .. " struct-scan=true kind=" .. kind)
-                        end
-                        did = true
-                    else
-                        log(label .. "." .. pname .. " struct-scan failed ok=" .. tostring(ok) ..
-                            " before=" .. tostring(before) .. " after=" .. tostring(after) .. " kind=" .. kind)
-                    end
-                end
-            end
-        end)
-    end)
-    if not ok_iter then
-        local key = label .. ".field-scan-unavailable"
-        if not field_stamp_log[key] then
-            field_stamp_log[key] = true
-            log(label .. ".field-scan unavailable")
-        end
-    end
-    return did
+    -- Retired 0.1.89, see set_struct_string_fields.
+    return false
 end
 local function stable_inventory_id(sid)
     return string.format("%08x%08x%08x%08x",
@@ -1427,11 +1383,10 @@ local playerdata_fields = {
     "ID", "Id",
 }
 local controller_id_fields = {
-    "UniquePlayerID", "UniquePlayerId", "UniquePlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363",
-    "PlayerID", "PlayerId", "PlayerIDString", "PlayerIdString",
-    "PlayerdataID", "PlayerDataID", "PlayerdataId", "PlayerDataId",
-    "UniqueID", "UniqueId", "SteamID", "SteamId", "UserID", "UserId",
-    "OwnerID", "OwnerId", "ID", "Id",
+    -- Only the game's own variable. The generic names that used to follow
+    -- ("PlayerID", "UniqueID", ...) resolve on APlayerState to the engine's
+    -- PlayerId and UniqueId, which are not ours to write.
+    "UniquePlayerID", "UniquePlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363",
 }
 local inventory_id_fields = {
     "InventoryID", "InventoryId", "InventoryUID", "InventoryUid",
@@ -1476,59 +1431,10 @@ local function playerdata_param_id(s)
     return found
 end
 local function stamp_playerdata_param(param, sid, why)
-    if not isSynth(sid) or param == nil then return false end
-    local patch = {}
-    for _, field in ipairs(playerdata_fields) do patch[field] = sid end
-    local s
-    local ok_get = pcall(function() s = param:get() end)
-    if not ok_get or not validish(s) then
-        local ok_table = pcall(function() param:set(patch) end)
-        local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
-        if not field_stamp_log[key] then
-            field_stamp_log[key] = true
-            log(key .. " get_ok=" .. tostring(ok_get) ..
-                " valid=false table_ok=" .. tostring(ok_table))
-        end
-        return ok_table, patch, nil, ok_table and "table" or "none"
-    end
-    local before = playerdata_param_id(s)
-    local label = "Playerdata param stamped why=" .. tostring(why or "")
-    local did = set_struct_string_fields(s, playerdata_fields, sid, label, false)
-    did = set_struct_matching_string_props(s, is_player_id_field, sid, label, false) or did
-    if ENABLE_DYNAMIC_FIELD_SCANS then
-        pcall(function()
-            s:ForEachProperty(function(prop)
-                local pname = prop_name(prop)
-                local kind = prop_kind(prop)
-                if pname and (kind == "Str" or kind == "Name" or kind == "Text") and is_player_id_field(pname) then
-                    patch[pname] = sid
-                end
-            end)
-        end)
-    end
-    local ok_struct = false
-    if did then ok_struct = pcall(function() param:set(s) end) end
-    local after = playerdata_param_id(s)
-    local ok_table = false
-    if after ~= sid then
-        ok_table = pcall(function() param:set(patch) end)
-        -- Read the parameter back through a fresh get(): the struct handle
-        -- above may be a copy, and what matters is what the callee will see.
-        pcall(function()
-            local s2 = param:get()
-            if validish(s2) then after = playerdata_param_id(s2) end
-        end)
-    end
-    local key = "Playerdata param set why=" .. tostring(why or "") .. " sid=" .. sid
-    if not field_stamp_log[key] then
-        field_stamp_log[key] = true
-        log(key .. " before=" .. tostring(before or "") .. " after=" .. tostring(after or "") ..
-            " struct_changed=" .. tostring(did) .. " struct_ok=" .. tostring(ok_struct) ..
-            " table_ok=" .. tostring(ok_table))
-    end
-    local kind = ok_table and "table" or "struct"
-    local full_struct = (after == sid or did or ok_struct) and s or nil
-    return after == sid or did or ok_struct or ok_table, patch, full_struct, kind
+    -- Retired 0.1.89: param:set() with a table writes loader-built strings
+    -- into the game's parameter frame. Vanilla mode never saves under a
+    -- synthetic id, so there is nothing to patch here any more.
+    return false
 end
 local function inventory_param_id(s)
     if not validish(s) then return nil end
@@ -1568,64 +1474,9 @@ local function inventory_param_id(s)
     return found
 end
 local function stamp_inventory_param(param, sid, why)
-    if not isSynth(sid) or param == nil then return false end
-    local inv_id = stable_inventory_id(sid)
-    local s
-    local ok_get = pcall(function() s = param:get() end)
-    if not ok_get or not validish(s) then
-        local key = "Inventory param set why=" .. tostring(why or "") .. " sid=" .. sid
-        if not field_stamp_log[key] then
-            field_stamp_log[key] = true
-            log(key .. " get_ok=" .. tostring(ok_get) .. " valid=false")
-        end
-        return false
-    end
-    local before = inventory_param_id(s)
-    local label = "Inventory param stamped why=" .. tostring(why or "")
-    local did = set_struct_guid_fields(s, strict_inventory_id_fields, inv_id, label, false)
-    did = set_struct_string_fields(s, strict_inventory_id_fields, inv_id, label, false) or did
-    did = set_struct_matching_inventory_props(s, inv_id, label, true) or did
-    if not did and ENABLE_INVENTORY_PARAM_INTROSPECT then
-        local expanded = expand_mangled_fields(s, strict_inventory_id_fields)
-        if #expanded > #strict_inventory_id_fields then
-            did = set_struct_guid_fields(s, expanded, inv_id, label, false) or did
-            did = set_struct_string_fields(s, expanded, inv_id, label, false) or did
-        end
-        if not did then
-            -- Nothing on this struct carries an inventory id under any authored
-            -- name. Say what it does carry, once per process, so the next join
-            -- names the field to key instead of failing silently again.
-            local shape_key = "inventory-param-shape"
-            if not field_stamp_log[shape_key] then
-                field_stamp_log[shape_key] = true
-                local names = struct_property_names(s, 32)
-                log("Inventory param shape " ..
-                    (names and table.concat(names, ",") or "(enumeration unavailable)"))
-            end
-        end
-    end
-    local ok_struct = false
-    if did then ok_struct = pcall(function() param:set(s) end) end
-    local after = inventory_param_id(s)
-    -- The sibling playerdata stamp lands through a table patch when the
-    -- per-field struct writes do not, and on this build that is the only path
-    -- that works: it reports table_ok=true on the very saves where this one
-    -- reported changed=false, and the inventory parameter does not even support
-    -- property enumeration. Take the same route rather than giving up on it.
-    local ok_table = false
-    if normalize_hex32(after) ~= inv_id then
-        local patch = {}
-        for _, field in ipairs(strict_inventory_id_fields) do patch[field] = inv_id end
-        ok_table = pcall(function() param:set(patch) end)
-    end
-    local key = "Inventory param set why=" .. tostring(why or "") .. " sid=" .. sid
-    if not field_stamp_log[key] then
-        field_stamp_log[key] = true
-        log(key .. " inv=" .. inv_id .. " before=" .. tostring(before or "") ..
-            " after=" .. tostring(after or "") .. " changed=" .. tostring(did) ..
-            " struct_ok=" .. tostring(ok_struct) .. " table_ok=" .. tostring(ok_table))
-    end
-    return normalize_hex32(after) == inv_id or did or ok_struct or ok_table
+    -- Retired 0.1.89, see stamp_playerdata_param. The pawn's inventory id is
+    -- stamped in place instead (SR.stamp_vanilla_inventory).
+    return false
 end
 local function stamp_playerdata_record(c, sid, why)
     local out = { seen = {}, items = {} }
@@ -1738,7 +1589,6 @@ local function clear_invalid_identity_stamp(c, k, key)
     local function clear_owner(owner, owner_label)
         if not validish(owner) then return false end
         local did = false
-        did = pcall(function() owner.UniquePlayerID = value end) or did
         did = set_string_fields(owner, controller_id_fields, value,
             label .. " " .. owner_label .. ".known", false) or did
         did = set_matching_string_props(owner, is_player_identity_field_name, value,
@@ -1761,8 +1611,7 @@ local stamped_log = {}
 stamp_unique_player_id = function(c, sid, why)
     if not (c and c:IsValid()) or not isSynth(sid) then return false end
     local did = false
-    local ok_pc = pcall(function() c.UniquePlayerID = sid end)
-    did = did or ok_pc
+    local ok_pc = false
     local scan_pc = set_string_fields(c, controller_id_fields, sid,
         "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] pc.generated why=" .. tostring(why or ""), false)
     scan_pc = set_matching_string_props(c, is_player_identity_field_name, sid,
@@ -1772,8 +1621,6 @@ stamp_unique_player_id = function(c, sid, why)
     local ok_pawn = false
     local scan_pawn = false
     if pawn then
-        ok_pawn = pcall(function() pawn.UniquePlayerID = sid end)
-        did = did or ok_pawn
         scan_pawn = set_string_fields(pawn, controller_id_fields, sid,
             "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] pawn.generated why=" .. tostring(why or ""), false)
         scan_pawn = set_matching_string_props(pawn, is_player_identity_field_name, sid,
@@ -1785,8 +1632,6 @@ stamp_unique_player_id = function(c, sid, why)
     pcall(function()
         local ps = c.PlayerState
         if ps and ps:IsValid() then
-            ok_ps = pcall(function() ps.UniquePlayerID = sid end)
-            did = did or ok_ps
             scan_ps = set_string_fields(ps, controller_id_fields, sid,
                 "UniquePlayerID stamped [" .. tostring(akey(c)) .. "] ps.generated why=" .. tostring(why or ""), false)
             scan_ps = set_matching_string_props(ps, is_player_identity_field_name, sid,
@@ -2138,9 +1983,16 @@ local function read_saved_player_id(e, field)
     if pcall(function() str = v:ToString() end) and type(str) == "string" then return str end
     return nil
 end
+local refused_write_log = {}
 local function write_saved_player_id(e, field, value)
-    local ok = pcall(function() e[field] = value end)
-    return ok and read_saved_player_id(e, field) == value
+    -- Retired 0.1.89: never write a string into a saved record from here (see
+    -- set_struct_string_fields). Kept so the old callers stay inert.
+    local key = tostring(field)
+    if not refused_write_log[key] then
+        refused_write_log[key] = true
+        log("saved record string write refused (retired 0.1.89) field=" .. key .. " value=" .. tostring(value))
+    end
+    return false
 end
 restore_saved_player_key = function(k, why)
     local job = pending_key_swaps[k]
@@ -2200,7 +2052,9 @@ local function saved_player_inv_field(e)
 end
 local record_inv_log = {}
 local function align_saved_record_inventory(e, sid, k)
-    local want = normalize_hex32(stable_inventory_id(sid))
+    -- `sid` may be a synthetic id (legacy: its stable inventory id) or a
+    -- 32-hex inventory id to write as is.
+    local want = normalize_hex32(sid) or normalize_hex32(stable_inventory_id(sid))
     local field = saved_player_inv_field(e)
     if not field or not want then return false end
     local before = read_guid_prop(e, field)
@@ -2401,6 +2255,105 @@ local function swap_saved_player_key(k, sid, blank_key)
         " parked=" .. tostring(blank_i ~= nil))
     return true
 end
+-- ---------------------------------------------------------------------------
+-- 0.1.89: the game's own profile keying, plus one numeric write.
+-- A client with a blank platform id loads and saves under the game's blank
+-- profile ("TESTING UID"). What that flow loses is the inventory: the pawn's
+-- inventory id is 0000 at load, so the game hands out an empty inventory and
+-- the starter items stay bound to nobody (locked hotbar, nothing kept). The
+-- inventory id is a GUID, written in place as four integers, and that is the
+-- only write this mode makes: on the pawn before the game's load, save and
+-- inventory apply, and on the blank profile record before the game's load.
+-- Which inventory: the blank profile's own if it has one, else the newest
+-- record carrying the player's name (a profile an earlier build keyed under a
+-- synthetic id), else a fixed id derived from the blank key.
+-- ---------------------------------------------------------------------------
+local vanilla_inv_log = {}
+local function record_matches_name(nm, want_a, want_b)
+    if not nm or nm == "" or nm == "#retired" then return false end
+    return nm == want_a or (want_b ~= nil and nm == want_b)
+end
+local function vanilla_profile_scan(name_a, name_b)
+    local arr = saved_players_array()
+    if not arr then return nil end
+    local n = 0
+    if not pcall(function() n = arr:GetArrayNum() end) then return nil end
+    local out = { n = n }
+    for i = 1, n do
+        local e
+        if pcall(function() e = arr[i] end) and e ~= nil then
+            local idf = saved_player_id_field(e)
+            local invf = saved_player_inv_field(e)
+            local id = idf and read_saved_player_id(e, idf) or ""
+            local inv = invf and normalize_hex32(read_guid_prop(e, invf)) or nil
+            local nm = read_saved_player_name(e) or ""
+            if id == "TESTING UID" then
+                if not out.profile_i then out.profile_i, out.profile_inv = i, inv end
+            elseif not id:find("#", 1, true) and id ~= "ERROR, BAD UNIQUE NET ID" and
+                inv and not is_blank_guid(inv) and record_matches_name(nm, name_a, name_b) then
+                out.name_i, out.name_inv = i, inv   -- newest wins
+            end
+        end
+    end
+    return out
+end
+local function vanilla_inventory_hex(c, k)
+    local name_a = SR_current_name and SR_current_name(k) or nil
+    local name_b = nil
+    pcall(function() name_b = stable_pname(c, k) end)
+    local scan = vanilla_profile_scan(name_a, name_b)
+    local hex, source, index
+    if scan and scan.profile_inv and not is_blank_guid(scan.profile_inv) then
+        hex, source, index = scan.profile_inv, "profile", scan.profile_i
+    elseif scan and scan.name_inv then
+        hex, source, index = scan.name_inv, "name-match", scan.name_i
+    else
+        hex, source, index = normalize_hex32(stable_inventory_id("TESTING UID")), "fresh", nil
+    end
+    local key = tostring(k) .. ":" .. tostring(hex) .. ":" .. source
+    if not vanilla_inv_log[key] then
+        vanilla_inv_log[key] = true
+        log("vanilla identity: inventory for [" .. tostring(k) .. "] = " .. tostring(hex) ..
+            " source=" .. source .. " record=" .. tostring(index) ..
+            " profile=" .. tostring(scan and scan.profile_i) .. " name=" .. tostring(name_a) ..
+            "/" .. tostring(name_b) .. " records=" .. tostring(scan and scan.n))
+    end
+    return hex, scan
+end
+local function stamp_vanilla_inventory(c, k, why)
+    local hex = vanilla_inventory_hex(c, k)
+    if not hex then return false end
+    local pawn = pawn_of(c)
+    if not validish(pawn) then return false end
+    local inv
+    if not pcall(function() inv = pawn.InventorySystem end) or not validish(inv) then return false end
+    local label = "vanilla inventory id [" .. tostring(k) .. "] pawn.InventorySystem why=" .. tostring(why or "")
+    local did = set_guid_fields(inv, { "InventoryID" }, hex, label, false)
+    if did then push_net_update(c, "vanilla-inv:" .. tostring(why or "")) end
+    return did
+end
+local function align_vanilla_record(c, k, why)
+    local hex, scan = vanilla_inventory_hex(c, k)
+    if not hex or not scan or not scan.profile_i then return false end
+    if scan.profile_inv == hex then return true end
+    local arr = saved_players_array()
+    local e
+    if not arr or not pcall(function() e = arr[scan.profile_i] end) or e == nil then return false end
+    local ok = align_saved_record_inventory(e, hex, k)
+    log("vanilla identity: blank profile record [" .. tostring(scan.profile_i) .. "] inventory " ..
+        tostring(scan.profile_inv) .. " -> " .. hex .. " why=" .. tostring(why or "") .. " ok=" .. tostring(ok))
+    return ok
+end
+local function log_vanilla_profile()
+    local scan = vanilla_profile_scan(nil, nil)
+    if not scan then return end
+    log("vanilla identity: records=" .. tostring(scan.n) .. " blank profile record=" ..
+        tostring(scan.profile_i) .. " inv=" .. tostring(scan.profile_inv) ..
+        (scan.profile_i and "" or " (none yet; the game makes one on the first join)"))
+end
+    SR.stamp_vanilla_inventory = stamp_vanilla_inventory
+    SR.align_vanilla_record = align_vanilla_record
+    SR.log_vanilla_profile = log_vanilla_profile
     SR.swap_saved_player_key = swap_saved_player_key
     SR.restore_stale_key_swaps = restore_stale_key_swaps
     SR.repair_saved_player_ids = repair_saved_player_ids
@@ -2415,40 +2368,6 @@ end
     SR.pending_key_swaps = pending_key_swaps
 end
 
--- One-shot manual repair, driven by a file the hoster drops in data\:
---   record-restore.txt   containing   <index> <name> <sid>
--- Sets that record's id and last seen name, aligns its inventory id to the
--- sid's stable inventory id, then deletes the file. For a record an earlier
--- build retired by mistake.
-do
-    local path = SP_DIR and (SP_DIR .. "\\data\\record-restore.txt")
-    local body = path and read_all(path)
-    if body then
-        local idx, nm, sid = tostring(body):match("^%s*(%d+)%s+(%S+)%s+(%d+)")
-        local done = false
-        SP.every("host-record-restore", 1000, 9000, function()
-            if done or not hosted then return end
-            local arr = SR.saved_players_array()
-            if not arr then return end
-            done = true
-            local i = tonumber(idx)
-            local e
-            if not (i and pcall(function() e = arr[i] end) and e ~= nil) then
-                log("record restore: index " .. tostring(idx) .. " not found")
-                os.remove(path)
-                return
-            end
-            local idf = SR.saved_player_id_field(e)
-            local ok_id = idf and SR.write_saved_player_id(e, idf, sid)
-            local ok_nm = SR.write_saved_player_id(e, "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED", nm)
-            SR.known_sids[sid] = true
-            local ok_inv = SR.align_saved_record_inventory(e, sid, "restore")
-            log("record restore [" .. i .. "] name=" .. nm .. " sid=" .. sid ..
-                " id_ok=" .. tostring(ok_id) .. " name_ok=" .. tostring(ok_nm) .. " inv_ok=" .. tostring(ok_inv))
-            os.remove(path)
-        end)
-    end
-end
 SR_current_name = function(k)
     local cs = SP.controllers and SP.controllers()
     if not cs then return nil end
@@ -2471,7 +2390,13 @@ local function try_install_bld_hook()
                 local k = akey(c)
                 mark_controller_seen(k)
                 SP.transition[k] = os.time()       -- join/load transition in flight
-                if IDENTITY_MODE == "vanilla" then return end
+                if IDENTITY_MODE == "vanilla" then
+                    -- The game's own load runs next: point the blank profile's
+                    -- inventory id and the pawn's at the player's inventory first.
+                    pcall(SR.align_vanilla_record, c, k, "begin-load")
+                    pcall(SR.stamp_vanilla_inventory, c, k, "begin-load")
+                    return
+                end
                 local key = ""
                 pcall(function() key = p1:get():ToString() end)
                 local sid, name_label = load_sid_for_controller(c, k)
@@ -2562,19 +2487,6 @@ local function try_install_bld_hook()
 end
 
 local save_player_hooked, save_player_tries = false, 0
-local save_flush_guard = false
-local function force_save_to_disk(reason)
-    if save_flush_guard then return end
-    save_flush_guard = true
-    enforce_world_slot_runtime("pre-force-save-" .. tostring(reason or ""))
-    local sm = FindFirstOf("BPC_SaveManager_C")
-    if sm and sm:IsValid() then
-        local ok = pcall(function() sm:SaveToDisk() end)
-        log("forced SaveToDisk reason=" .. tostring(reason or "") .. " ok=" .. tostring(ok))
-        if ok then normalize_save_games_dir(reason) end
-    end
-    save_flush_guard = false
-end
 local function save_sid_for_controller(c)
     if not (c and c:IsValid()) then return nil end
     -- The listen-server's local controller is not a real customer player. If we
@@ -2611,7 +2523,10 @@ local function try_install_save_player_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
-                if IDENTITY_MODE == "vanilla" then return end
+                if IDENTITY_MODE == "vanilla" then
+                    pcall(SR.stamp_vanilla_inventory, c, k, "pre-save")
+                    return
+                end
                 restore_saved_player_key(k, "pre-save")
                 SR.repair_saved_player_ids("pre-save")
                 if SP.kicked[k] then return end
@@ -2640,6 +2555,7 @@ local function try_install_save_player_hook()
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
                 if c:IsLocalPlayerController() then return end
+                if IDENTITY_MODE == "vanilla" then return end
                 if controller_blocked(akey(c)) then return end
                 local sid = save_sid_for_controller(c)
                 if sid then stamp_persistence_ids(c, sid, "post-save") end
@@ -2665,8 +2581,11 @@ local function try_install_apply_inventory_hook()
                 local c = self:get()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
-                if IDENTITY_MODE == "vanilla" then return end
                 local k = akey(c)
+                if IDENTITY_MODE == "vanilla" then
+                    pcall(SR.stamp_vanilla_inventory, c, k, "pre-inventory-apply")
+                    return
+                end
                 if SP.kicked[k] then return end
                 if SP.invalid_identity and SP.invalid_identity[k] then
                     local recovered_sid = invalid_identity_recovered_sid(k)
@@ -2693,6 +2612,7 @@ local function try_install_apply_inventory_hook()
                 local c = self and self:get()
                 if not (c and c:IsValid()) then return end
                 if c:IsLocalPlayerController() then return end
+                if IDENTITY_MODE == "vanilla" then return end
                 if controller_blocked(akey(c)) then return end
                 local sid = save_sid_for_controller(c)
                 if sid then stamp_persistence_ids(c, sid, "post-inventory-apply") end
@@ -2810,28 +2730,15 @@ SP.every("host-netid", 250, 0, function()
     tick()
 end)
 
--- forced world save cadence (the game autosaves too; this is the floor)
-local periodic_skip_logged = false
+-- Slot re-pin sweep. The game autosaves itself every ~150 s; since 0.1.89 the
+-- host never calls SaveToDisk on top of that. A forced save one second after
+-- the game's own async save crashed the game's save code on 2026-09-11, and
+-- the second join crash on 2026-09-13 came three seconds after a forced save
+-- at boot.
 SP.every("host-save", SAVE_INTERVAL_S * 1000, 2000, function()
     if not hosted then return end
     enforce_world_slot_runtime("periodic")
-    -- The game saved on its own recently: do not stack a second save on top
-    -- of its async save path. The floor only fires after ten quiet minutes.
-    if last_world_change_at > 0 and os.time() - last_world_change_at < 600 then
-        if not periodic_skip_logged then
-            periodic_skip_logged = true
-            log("periodic SaveToDisk yielding: the game saved " ..
-                tostring(os.time() - last_world_change_at) .. " s ago (logged once)")
-        end
-        normalize_save_games_dir("periodic")
-        return
-    end
-    local sm = FindFirstOf("BPC_SaveManager_C")
-    if sm and sm:IsValid() then
-        local ok = pcall(function() sm:SaveToDisk() end)
-        log("periodic SaveToDisk ok=" .. tostring(ok))
-        if ok then normalize_save_games_dir("periodic") end
-    end
+    normalize_save_games_dir("periodic")
 end)
 
 -- Keep the active save slot pinned between the game's own autosaves. This
@@ -2987,51 +2894,11 @@ local function dump_save_manager_layout()
             end)
         end
         if IDENTITY_MODE == "vanilla" then
-            -- One blank profile, the game's own. The first record under the exact
-            -- blank id is it; any other record carrying the same last seen name,
-            -- whatever its id, would win the game's name-keyed follow-up and bind
-            -- the client to a different inventory, so it is retired.
-            pcall(function()
-                local NAME_FIELD = "LastSeenPlayerName_91_46639CD541465306E9F7C987FEEDD6ED"
-                local idf
-                local primary, last_synth
-                for i = 1, n do
-                    local e = arr[i]
-                    idf = idf or SR.saved_player_id_field(e)
-                    local id = idf and SR.read_saved_player_id(e, idf) or ""
-                    if id == "TESTING UID" and not primary then primary = i end
-                    if isSynth(id) and not id:find("#", 1, true) then last_synth = i end
-                end
-                if not primary and last_synth then
-                    -- A world that ran the synthetic keying before has its profile
-                    -- under a synthetic id; the newest such record is the player's.
-                    local ok = SR.write_saved_player_id(arr[last_synth], idf, "TESTING UID")
-                    log("vanilla identity: promoted record [" .. last_synth .. "] to the blank profile ok=" .. tostring(ok))
-                    if ok then primary = last_synth end
-                end
-                if not primary then
-                    log("vanilla identity: no profile yet; the game makes one on the first join")
-                    return
-                end
-                local name = SR.read_saved_player_id(arr[primary], NAME_FIELD)
-                local retired = 0
-                for i = 1, n do
-                    if i ~= primary then
-                        local e = arr[i]
-                        local id = SR.read_saved_player_id(e, idf) or ""
-                        local nm = SR.read_saved_player_id(e, NAME_FIELD) or ""
-                        -- Every record but the profile and the host's own is a
-                        -- potential decoy for some machine name: retire it.
-                        if id ~= "ERROR, BAD UNIQUE NET ID" and (nm ~= "#retired" or not id:find("#", 1, true)) then
-                            local ok_id = id:find("#", 1, true) and true or SR.write_saved_player_id(e, idf, id .. "#retired" .. tostring(i))
-                            local ok_nm = nm == "#retired" or SR.write_saved_player_id(e, NAME_FIELD, "#retired")
-                            retired = retired + 1
-                            log("vanilla identity: retired record [" .. i .. "] id=" .. id .. " name=" .. nm .. " ok=" .. tostring(ok_id and ok_nm))
-                        end
-                    end
-                end
-                log("vanilla identity: profile record [" .. primary .. "] name=" .. tostring(name) .. " retired=" .. retired)
-            end)
+            -- Read-only: say which record is the game's blank profile. No
+            -- record is promoted or retired any more (string writes, retired
+            -- 0.1.89); a record an earlier build keyed under a synthetic id is
+            -- found by name at join time and only its inventory id is reused.
+            pcall(SR.log_vanilla_profile)
             return
         end
         pcall(SR.repair_saved_player_ids, "boot")
@@ -3078,12 +2945,6 @@ local function dump_save_manager_layout()
         end)
     end)
 end
-
--- If the BeginLoadData post-hook ever fails to run, put swapped records back.
-SP.every("host-key-swap-guard", 250, 100, function()
-    if not hosted then return end
-    pcall(SR.restore_stale_key_swaps, 2)
-end)
 
 SP.every("host-save-normalize", 15000, 7000, function()
     if not hosted then return end
