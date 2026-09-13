@@ -263,6 +263,7 @@ public sealed class SolarpunkHttpService : BackgroundService
                     instance = _identity.InstanceId,
                     server_name = string.IsNullOrWhiteSpace(_opts.ServerName) ? $"Solarpunk - {_identity.InstanceId}" : _opts.ServerName.Trim(),
                     solarpunk_version = SolarpunkVersionInfo.SolarpunkVersion,
+                    native_character_identity = true,
                     sp_build = SolarpunkVersionInfo.SpBuild,
                     gameplay_port = _opts.GameplayPort,
                     query_port = _opts.QueryPort,

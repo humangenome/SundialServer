@@ -53,6 +53,13 @@ Release builds are self-contained; a separate .NET install is not required for n
 
 Players connect with the Sundial app to `<host>:<GameplayPort>`.
 
+For server 0.1.90 and later, players need Sundial app 0.1.71 or later. Close the
+game and restart the app to update its client runtime before connecting. Character
+identity now comes from the selected character before the first load; the server
+leaves the game's normal save and inventory handling intact. Existing saves with
+damaged character-to-inventory links need a separate repair from a preserved copy;
+updating alone does not restore missing or incorrectly linked data.
+
 > **Note:** the release zip is complete — it bundles the in-game runtime (UE4SS + Sundial's server mods + the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat, roster, or admin tools. Managed hosting includes the runtime and stages it for you.
 
 ## Server Settings

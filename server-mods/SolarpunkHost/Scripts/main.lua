@@ -1,6 +1,6 @@
--- SolarpunkHost: the headless host pipeline. Transport swap -> named
--- persistent world -> HostGame -> per-player net-id save/load keying ->
--- periodic world save -> host status file.
+-- SolarpunkHost: transport swap, named persistent world, HostGame,
+-- load-transition observation and host status. The client supplies its
+-- character identity; the game owns character and inventory persistence.
 --
 -- This is host_netid_enforcer.lua (the proven transport+net-id base, kept
 -- verbatim where possible — see that file for the full root-cause notes)
@@ -2351,8 +2351,6 @@ local function log_vanilla_profile()
         tostring(scan.profile_i) .. " inv=" .. tostring(scan.profile_inv) ..
         (scan.profile_i and "" or " (none yet; the game makes one on the first join)"))
 end
-    SR.stamp_vanilla_inventory = stamp_vanilla_inventory
-    SR.align_vanilla_record = align_vanilla_record
     SR.log_vanilla_profile = log_vanilla_profile
     SR.swap_saved_player_key = swap_saved_player_key
     SR.restore_stale_key_swaps = restore_stale_key_swaps
@@ -2382,251 +2380,30 @@ local function try_install_bld_hook()
     if ld_hooked then return end
     ld_tries = ld_tries + 1
     local ok = pcall(function()
-        RegisterHook(BLD_CLASS .. ":BeginLoadData", function(self, p1)
-            pcall(function()
-                local c = self:get()
-                if not c or not c:IsValid() then return end
-                if c:IsLocalPlayerController() then return end
-                local k = akey(c)
-                mark_controller_seen(k)
-                SP.transition[k] = os.time()       -- join/load transition in flight
-                if IDENTITY_MODE == "vanilla" then
-                    -- The game's own load runs next: point the blank profile's
-                    -- inventory id and the pawn's at the player's inventory first.
-                    pcall(SR.align_vanilla_record, c, k, "begin-load")
-                    pcall(SR.stamp_vanilla_inventory, c, k, "begin-load")
-                    return
-                end
-                local key = ""
-                pcall(function() key = p1:get():ToString() end)
-                local sid, name_label = load_sid_for_controller(c, k)
-                if is_blank_id(key) then
-                    -- Writing the parameter here does not reach the Blueprint VM
-                    -- (re-proven 2026-09-07: the readback showed the new value and the
-                    -- game still ran the load with the blank key). The corrected load is
-                    -- re-issued from the tick below; see the dead-end list in the
-                    -- keying section.
-                    if SR.swap_saved_player_key(k, sid, key) then
-                        -- The game's own load now returns the player's record, and
-                        -- so does its follow-up lookup by the same blank key ~30 ms
-                        -- later, which is what binds the client's inventory id. A
-                        -- re-issued load would have to undo the swap first and the
-                        -- follow-up then found the blank record instead (seen
-                        -- 2026-09-08: client bound to the blank record's inventory).
-                        -- So: no re-issue. The swap is undone at the first save or
-                        -- after two seconds, whichever comes first.
-                        loaded_sid[k] = sid
-                        load_reissued_sid[k] = sid
-                        pending[k] = nil
-                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
-                        stamp_unique_player_id(c, sid, "begin-load-swapped")
-                        return
-                    end
-                    if recovered_load_already(k, sid) then
-                        reject_remote_identity(c, k, key, sid, "blank-load-key", true)
-                        mark_invalid_identity_recovered(k, sid, name_label)
-                        clear_invalid_identity_if_auth_recovered(k)
-                        stamp_unique_player_id(c, sid, "begin-load-recover-blank-key-duplicate")
-                    elseif sid then
-                        reject_remote_identity(c, k, key, sid, "blank-load-key", true)
-                        if schedule_begin_load_recovery(c, k, key, sid, name_label, "blank-load-key") then
-                            mark_invalid_identity_recovered(k, sid, name_label)
-                            clear_invalid_identity_if_auth_recovered(k)
-                            stamp_unique_player_id(c, sid, "begin-load-recover-blank-key")
-                        end
-                    else
-                        reject_remote_identity(c, k, key, sid, "blank-load-key")
-                    end
-                    return
-                end
-                if isSynth(key) then
-                    if sid and key ~= sid then
-                        reject_remote_identity(c, k, key, sid, "synthetic-key-mismatch")
-                        return
-                    end
-                    loaded_sid[k] = key
-                    pending[k] = nil
-                    if SP.invalid_identity then SP.invalid_identity[k] = nil end
-                    stamp_unique_player_id(c, key, "begin-load-valid")
-                else
-                    if recovered_load_already(k, sid) then
-                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key", true)
-                        mark_invalid_identity_recovered(k, sid, name_label)
-                        clear_invalid_identity_if_auth_recovered(k)
-                        stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key-duplicate")
-                    elseif sid then
-                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key", true)
-                        if schedule_begin_load_recovery(c, k, key, sid, name_label, "non-synthetic-load-key") then
-                            mark_invalid_identity_recovered(k, sid, name_label)
-                            clear_invalid_identity_if_auth_recovered(k)
-                            stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key")
-                        end
-                    else
-                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key")
-                    end
-                end
-            end)
-        end, function(self)
-            pcall(function()
-                local c = self:get()
-                if not c or not c:IsValid() then return end
-                if c:IsLocalPlayerController() then return end
-                local k = akey(c)
-                mark_controller_seen(k)
-                SP.transition[k] = os.time()
-            end)
+        -- Blueprint callbacks are post-hooks. Observe the completed load only;
+        -- the client supplies its stable identity before the request is sent.
+        -- Re-keying a profile, stamping an inventory, or replaying this request
+        -- after the game ran it can detach the client from its actual inventory.
+        RegisterHook(BLD_CLASS .. ":BeginLoadData", function(self, player_id)
+            local c = self:get()
+            if not c or not c:IsValid() or c:IsLocalPlayerController() then return end
+            local k = akey(c)
+            mark_controller_seen(k)
+            SP.transition[k] = os.time()
+            local id = player_id:get():ToString()
+            if is_blank_id(id) then
+                log("player load used a placeholder identity; update the client app before reconnecting")
+            else
+                log("player load completed with client identity=" .. tostring(id))
+            end
         end)
     end)
     if ok then
         ld_hooked = true
-        log("BeginLoadData hook installed (attempt " .. ld_tries .. ")")
+        log("BeginLoadData observation hook installed (attempt " .. ld_tries .. ")")
     elseif ld_tries >= 60 then
-        ld_hooked = true -- stop retrying
-        log("BeginLoadData hook FAILED after " .. ld_tries .. " tries")
-    end
-end
-
-local save_player_hooked, save_player_tries = false, 0
-local function save_sid_for_controller(c)
-    if not (c and c:IsValid()) then return nil end
-    -- The listen-server's local controller is not a real customer player. If we
-    -- stamp or re-save it, the game can persist customer state under host-local.
-    if c:IsLocalPlayerController() then return nil end
-    local k = akey(c)
-    local locked = locked_sid_for_controller(k)
-    if locked then
-        local nm = stable_pname(c, k)
-        local desired = nm and synthId(nm) or nil
-        if desired and desired ~= locked then
-            local log_key = tostring(k) .. ":" .. tostring(locked) .. ":" .. tostring(desired) .. ":save"
-            if not sid_lock_log[log_key] then
-                sid_lock_log[log_key] = true
-                log("save identity using locked load sid [" .. tostring(k) ..
-                    "] sid=" .. tostring(locked) ..
-                    " ignoring_later_name=" .. tostring(nm) ..
-                    " later_sid=" .. tostring(desired))
-            end
-        end
-        return locked
-    end
-    local nm = stable_pname(c, k)
-    if not nm then return trusted_existing_sid(c, k) end
-    return synthId(nm)
-end
-local function try_install_save_player_hook()
-    if save_player_hooked then return end
-    save_player_tries = save_player_tries + 1
-    local ok = pcall(function()
-        RegisterHook(BLD_CLASS .. ":SERVER_SavePlayerdata", function(self, playerdata)
-            pcall(function()
-                local c = self:get()
-                if not c or not c:IsValid() then return end
-                if c:IsLocalPlayerController() then return end
-                local k = akey(c)
-                if IDENTITY_MODE == "vanilla" then
-                    pcall(SR.stamp_vanilla_inventory, c, k, "pre-save")
-                    return
-                end
-                restore_saved_player_key(k, "pre-save")
-                SR.repair_saved_player_ids("pre-save")
-                if SP.kicked[k] then return end
-                if SP.invalid_identity and SP.invalid_identity[k] then
-                    local recovered_sid = invalid_identity_recovered_sid(k)
-                    if recovered_sid then
-                        stamp_persistence_ids(c, recovered_sid, "pre-save-recovered-invalid-identity")
-                        stamp_playerdata_param(playerdata, recovered_sid, "pre-save-recovered-invalid-identity")
-                        return
-                    end
-                    quarantine_unowned_save(c, k, "pre-save-invalid-identity")
-                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-invalid-identity")
-                    return
-                end
-                local sid = save_sid_for_controller(c)
-                if not sid then
-                    quarantine_unowned_save(c, k, "pre-save-no-sid")
-                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-no-sid")
-                    return
-                end
-                stamp_persistence_ids(c, sid, "pre-save")
-                stamp_playerdata_param(playerdata, sid, "pre-save")
-            end)
-        end, function(self)
-            pcall(function()
-                local c = self and self:get()
-                if not (c and c:IsValid()) then return end
-                if c:IsLocalPlayerController() then return end
-                if IDENTITY_MODE == "vanilla" then return end
-                if controller_blocked(akey(c)) then return end
-                local sid = save_sid_for_controller(c)
-                if sid then stamp_persistence_ids(c, sid, "post-save") end
-            end)
-        end)
-    end)
-    if ok then
-        save_player_hooked = true
-        log("SERVER_SavePlayerdata hook installed (attempt " .. save_player_tries .. ")")
-    elseif save_player_tries >= 60 then
-        save_player_hooked = true
-        log("SERVER_SavePlayerdata hook FAILED after " .. save_player_tries .. " tries")
-    end
-end
-
-local inventory_apply_hooked, inventory_apply_tries = false, 0
-local function try_install_apply_inventory_hook()
-    if inventory_apply_hooked then return end
-    inventory_apply_tries = inventory_apply_tries + 1
-    local ok = pcall(function()
-        RegisterHook(BLD_CLASS .. ":SERVER_Net_ApplyAndSaveInventory", function(self, inventory)
-            pcall(function()
-                local c = self:get()
-                if not c or not c:IsValid() then return end
-                if c:IsLocalPlayerController() then return end
-                local k = akey(c)
-                if IDENTITY_MODE == "vanilla" then
-                    pcall(SR.stamp_vanilla_inventory, c, k, "pre-inventory-apply")
-                    return
-                end
-                if SP.kicked[k] then return end
-                if SP.invalid_identity and SP.invalid_identity[k] then
-                    local recovered_sid = invalid_identity_recovered_sid(k)
-                    if recovered_sid then
-                        stamp_persistence_ids(c, recovered_sid, "pre-inventory-recovered-invalid-identity")
-                        stamp_inventory_param(inventory, recovered_sid, "pre-inventory-recovered-invalid-identity")
-                        return
-                    end
-                    quarantine_unowned_save(c, k, "pre-inventory-invalid-identity")
-                    stamp_inventory_param(inventory, HOST_SYNTH_ID, "pre-inventory-invalid-identity")
-                    return
-                end
-                local sid = save_sid_for_controller(c)
-                if not sid then
-                    quarantine_unowned_save(c, k, "pre-inventory-no-sid")
-                    stamp_inventory_param(inventory, HOST_SYNTH_ID, "pre-inventory-no-sid")
-                    return
-                end
-                stamp_persistence_ids(c, sid, "pre-inventory-apply")
-                stamp_inventory_param(inventory, sid, "pre-inventory-apply")
-            end)
-        end, function(self)
-            pcall(function()
-                local c = self and self:get()
-                if not (c and c:IsValid()) then return end
-                if c:IsLocalPlayerController() then return end
-                if IDENTITY_MODE == "vanilla" then return end
-                if controller_blocked(akey(c)) then return end
-                local sid = save_sid_for_controller(c)
-                if sid then stamp_persistence_ids(c, sid, "post-inventory-apply") end
-            end)
-        end)
-    end)
-    if ok then
-        inventory_apply_hooked = true
-        log("SERVER_Net_ApplyAndSaveInventory hook installed (attempt " ..
-            inventory_apply_tries .. ")")
-    elseif inventory_apply_tries >= 60 then
-        inventory_apply_hooked = true
-        log("SERVER_Net_ApplyAndSaveInventory hook FAILED after " ..
-            inventory_apply_tries .. " tries")
+        ld_hooked = true
+        log("BeginLoadData observation hook FAILED after " .. ld_tries .. " tries")
     end
 end
 
@@ -2679,8 +2456,6 @@ SP.every("host-boot", 1000, 0, function()
     try_install_save_slot_hooks()
     try_install_savemgr_hooks()        -- install BEFORE HostGame so the boot world-load slot is rewritten to World1
     try_install_bld_hook()
-    try_install_save_player_hook()
-    try_install_apply_inventory_hook()
     normalize_save_games_dir("pre-host")
 
     -- transport: force IpNetDriver so the headless host binds real UDP
@@ -2715,8 +2490,6 @@ end)
 SP.every("host-bld-hook", 1000, 250, function()
     if not hosted then return end
     try_install_bld_hook()
-    try_install_save_player_hook()
-    try_install_apply_inventory_hook()
 end)
 
 SP.every("host-save-slot-hooks", 1000, 250, function()

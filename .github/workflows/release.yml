@@ -40,8 +40,8 @@ env:
   # Upstream re-cuts its moving tag in place and serves different bytes under
   # the same asset name, so a download-at-release-time pipeline ships whatever
   # happens to be there that day. See vendor/ue4ss/README.md.
-  UE4SS_SHA256: 09a06d70771938b5117d53f88934e701debb19a16a14ee1ac37d2f6481bdebdc
-  UE4SS_PROXY_SHA256: aa8eeee6a86537febdb4f6e3ba6aba7f825534e3f50092f7cbb745365a52a3dd
+  UE4SS_SHA256: 2ad348bf2025bd26b2aa63b478d9813afbd4e656c9bcfb3fdf6752c4d285f298
+  UE4SS_PROXY_SHA256: 8afd615b5c33c34bb2822af01dfe862097a8a82e1a1bd7888268e6467f4e1627
   # MinHook, pinned by commit. The build scripts clone the default branch when
   # the source is absent, which makes the native plugin a different binary on
   # every release for reasons nobody recorded.

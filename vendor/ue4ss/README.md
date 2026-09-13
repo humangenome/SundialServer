@@ -13,7 +13,7 @@ serves different bytes over time. A pipeline that downloads at release time
 therefore ships whatever the tag happens to point at that day, and a UE4SS core
 change lands on every host at once with nothing between it and the fleet.
 
-Measured on 2026-07-30: the runtime this project ships is `UE4SS.dll`
+Measured on 2026-07-30: the previous runtime was `UE4SS.dll`
 16,388,608 bytes, while `experimental-latest` was serving 16,519,168 bytes under
 the identical asset name. Different core, same URL.
 
@@ -23,8 +23,14 @@ So the pin is the file, not the URL.
 
 | File | sha256 | bytes |
 |---|---|---:|
-| `UE4SS.dll` | `09a06d70771938b5117d53f88934e701debb19a16a14ee1ac37d2f6481bdebdc` | 16,388,608 |
-| `dwmapi.dll` | `aa8eeee6a86537febdb4f6e3ba6aba7f825534e3f50092f7cbb745365a52a3dd` | 61,952 |
+| `UE4SS.dll` | `2ad348bf2025bd26b2aa63b478d9813afbd4e656c9bcfb3fdf6752c4d285f298` | 16,519,168 |
+| `dwmapi.dll` | `8afd615b5c33c34bb2822af01dfe862097a8a82e1a1bd7888268e6467f4e1627` | 71,680 |
+
+The September 2026 update includes the upstream
+[string-pool lifetime fix](https://github.com/UE4SS-RE/RE-UE4SS/commit/aa7241f4df57ed5c0ad75f31da628f2c0df06235).
+The old cache kept references to temporary Lua strings; later lookups could
+read freed memory. Keep the complete runtime settings: the abbreviated settings
+file omitted configuration needed during initialization.
 
 `.github/workflows/release.yml` carries the same two values and fails the
 release on a mismatch.
