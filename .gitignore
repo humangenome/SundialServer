@@ -31,3 +31,6 @@ __pycache__/
 # reproduce from this tree.
 native/SolarpunkPlugin/build/
 native/SolarpunkPlugin/minhook/
+
+# SolarpunkEosIdentity build output (built in CI, never committed)
+native/SolarpunkEosIdentity/*.dll
