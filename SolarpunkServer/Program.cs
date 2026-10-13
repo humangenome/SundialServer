@@ -20,6 +20,13 @@ public static class Program
             return InjectCommand.Run(args[1..]);
         }
 
+        // One-shot CLI verb: start the game suspended with DLLs queued to load at its
+        // first moment (Epic identity store, UE4SS). See LaunchCommand.
+        if (args.Length > 0 && string.Equals(args[0], "launch", StringComparison.OrdinalIgnoreCase))
+        {
+            return LaunchCommand.Run(args[1..]);
+        }
+
         // Verbose toggle: Solarpunk:Verbose (config / appsettings.json) OR the
         // SOLARPUNK_VERBOSE env var. When on, the minimum log level drops to Debug
         // so the RCON / A2S / HTTP / heartbeat instrumentation is emitted. Off by
