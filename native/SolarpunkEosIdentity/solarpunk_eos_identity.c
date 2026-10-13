@@ -8,9 +8,10 @@
 // remote logon has no credential vault at all.
 //
 // This DLL re-points the SDK's four advapi32 credential imports (CredReadW, CredWriteW,
-// CredDeleteW, CredFree) at one file per server: <UserDir>\ss_eos_identity.cred, where UserDir
-// is the game's -UserDir= argument. Nothing in the engine is patched. The SDK only reads back
-// what it wrote, so the file holds the CREDENTIALW fields verbatim.
+// CredDeleteW, CredFree) at one file per server: the path in SP_EOS_IDENTITY_FILE when the
+// launcher sets it, else <UserDir>\ss_eos_identity.cred (UserDir = the game's -UserDir=
+// argument). Nothing in the engine is patched. The SDK only reads back what it wrote, so the
+// file holds the CREDENTIALW fields verbatim.
 //
 // Redpoint signs in about 3 s after the game starts, before UE4SS mods load, so this DLL is
 // injected right after the process starts. Its thread waits for EOSSDK-Win64-Shipping.dll and
@@ -144,6 +145,10 @@ static int arm(void) {
     if (!g_dir[0] && !userdir_from_cmdline(g_dir, sizeof g_dir)) { DWORD n_ = GetTempPathA(sizeof g_dir, g_dir); if (n_ && n_ < sizeof g_dir && g_dir[n_ - 1] == '\\') g_dir[n_ - 1] = 0; };
     snprintf(g_logPath, sizeof g_logPath, "%s\\ss_eos.log", g_dir);
     snprintf(g_identityFile, sizeof g_identityFile, "%s\\ss_eos_identity.cred", g_dir);
+    {   // The launcher may keep the credential outside the server's own folder.
+        char envFile[MAX_PATH]; DWORD n = GetEnvironmentVariableA("SP_EOS_IDENTITY_FILE", envFile, sizeof envFile);
+        if (n > 0 && n < sizeof envFile) snprintf(g_identityFile, sizeof g_identityFile, "%s", envFile);
+    }
     HMODULE sdk = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");
     if (!sdk) return 0;
     void* r = patch_import(sdk, "CredReadW", (void*)my_CredReadW);
