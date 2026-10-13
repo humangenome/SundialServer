@@ -5,9 +5,9 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows_x64-blue.svg)](#requirements)
 [![Game](https://img.shields.io/badge/Game-Solarpunk-darkgreen.svg)](https://store.steampowered.com/app/1805110/)
 
-SundialServer is the open-source host supervisor for Sundial multiplayer in **Solarpunk**. It starts and watches the hosted game process, takes and restores save snapshots, exposes an admin HTTP API, answers Source A2S query, and runs Source RCON.
+SundialServer runs a **Solarpunk dedicated server** on a Windows machine. It starts the game headless with the Sundial runtime, watches the game process, takes and restores world snapshots, answers Source A2S query, runs Source RCON and serves an admin HTTP API.
 
-Players join with the [Sundial app](https://github.com/HumanGenome/Sundial). A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin), which the **release zip bundles** as an `ue4ss-server\` folder — you copy its contents into the game's `Binaries\Win64` directory once. See [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
+Players join with the [Sundial app](https://github.com/HumanGenome/Sundial). A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin). The **release zip bundles it** as an `ue4ss-server\` folder, and you copy its contents into the game's `Binaries\Win64` directory once. See [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
 
 ## Features
 
@@ -21,7 +21,7 @@ Snapshots the world automatically on every game auto-save (when `SnapshotsEnable
 Answers standard Source A2S query on the configured query port so monitoring tools can read server name, map, player count, and the player list.
 
 ### 🛠 Source RCON
-Runs a Source-compatible RCON listener with `help`, `status`, `players`, `ping`, `save snapshot`, `save list`, `say`, `announce`, and `motd`, plus slash commands registered by server mods.
+Runs a Source-compatible RCON listener with `help`, `status`, `players`, `ping`, `save snapshot`, `save list`, `say`, `announce`, `motd`, `ban`, `unban` and `bans`, plus slash commands registered by server mods.
 
 ### 🔐 Admin HTTP API
 Exposes snapshot list/upload/download/restore, save import, health, player list, and mod manifest endpoints. Admin routes are HMAC-signed with a key derived from the RCON password.
@@ -45,22 +45,17 @@ Release builds are self-contained; a separate .NET install is not required for n
 ### Self-host
 1. Download `SundialServer-v<version>.zip` from the [latest release](https://github.com/HumanGenome/SundialServer/releases/latest). It is self-contained: `SolarpunkServer\` (the supervisor + `appsettings.json`) plus the in-game runtime under `ue4ss-server\`.
 2. Extract it to a stable folder, such as `C:\Solarpunk\`.
-3. Install the Solarpunk game files under the folder set as `GameInstallRoot` (default `C:\Solarpunk\game`) — copy your `steamapps\common\Solarpunk` folder there, or install with SteamCMD (app `1805110`). The server runs headless; no GPU is required.
-4. Copy the **contents** of `SolarpunkServer\ue4ss-server\` into `<GameInstallRoot>\Solarpunk\Binaries\Win64\`. The supervisor launches the game but does not stage the runtime for you — see [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
+3. Install the Solarpunk game files under the folder set as `GameInstallRoot` (default `C:\Solarpunk\game`): copy your `steamapps\common\Solarpunk` folder there, or install with SteamCMD (app `1805110`). The server runs headless; no GPU is required.
+4. Copy the **contents** of `SolarpunkServer\ue4ss-server\` into `<GameInstallRoot>\Solarpunk\Binaries\Win64\`. The supervisor launches the game but does not stage the runtime for you (see [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime)).
 5. Edit `SolarpunkServer\appsettings.json` (see below).
 6. Open/forward the ports listed below.
 7. Run `SolarpunkServer\SolarpunkServer.exe`.
 
 Players connect with the Sundial app to `<host>:<GameplayPort>`.
 
-For server 0.1.90 and later, players need Sundial app 0.1.71 or later. Close the
-game and restart the app to update its client runtime before connecting. Character
-identity now comes from the selected character before the first load; the server
-leaves the game's normal save and inventory handling intact. Existing saves with
-damaged character-to-inventory links need a separate repair from a preserved copy;
-updating alone does not restore missing or incorrectly linked data.
+Server 0.1.90 and later needs Sundial app 0.1.71 or later on every player's PC. Close the game and restart the app so it updates its client runtime before connecting.
 
-> **Note:** the release zip is complete — it bundles the in-game runtime (UE4SS + Sundial's server mods + the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat, roster, or admin tools. Managed hosting includes the runtime and stages it for you.
+> **Note:** the release zip is complete. It bundles the in-game runtime (UE4SS, Sundial's server mods and the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat feed, roster or admin tools. Managed hosting includes the runtime and stages it for you.
 
 ## Server Settings
 
@@ -134,7 +129,13 @@ announce <message>
 motd [message]
 ```
 
-Mod-registered slash commands also run over RCON, with or without the leading `/`. Restoring a snapshot is **not** an RCON command — use the launcher's World backups dialog or the HTTP API.
+```text
+ban <player|id> [reason]
+unban <id>
+bans
+```
+
+Mod-registered slash commands also run over RCON, with or without the leading `/`. Restoring a snapshot is **not** an RCON command: use the launcher's World backups dialog or the HTTP API.
 
 ## Build From Source
 
@@ -154,21 +155,11 @@ To build the full distributable instead of just the supervisor:
 scripts/package-server.sh v<version>
 ```
 
-That assembles the supervisor, `runtime/` (UE4SS settings and signatures), the
-Lua mods from `server-mods/`, the native plugin from `native/SolarpunkPlugin/`,
-and the pinned UE4SS runtime binaries from `vendor/ue4ss/` into the same
-`SundialServer-v<version>.zip` layout the releases ship, and prints its sha256.
-Build the native plugin first -- `native/SolarpunkPlugin/build.sh` (mingw-w64,
-what releases ship) or `build.bat` (MSVC, for a Windows workstation). The
-packaging script fails closed and names anything it is missing rather than
-zipping an incomplete bundle.
+That assembles the supervisor, `runtime/` (UE4SS settings and signatures), the Lua mods from `server-mods/`, the native plugin from `native/SolarpunkPlugin/`, and the pinned UE4SS runtime binaries from `vendor/ue4ss/` into the same `SundialServer-v<version>.zip` layout the releases ship, and prints its sha256. Build the native plugin first: `native/SolarpunkPlugin/build.sh` (mingw-w64, what releases ship) or `build.bat` (MSVC, for a Windows workstation). The packaging script fails closed and names anything it is missing rather than zipping an incomplete bundle.
 
 ## Releases
 
-Releases are cut by CI from a tag and never by hand. Push `vX.Y.Z` with
-`Directory.Build.props` bumped in the same commit and `.github/release-notes/vX.Y.Z.md`
-written, and `.github/workflows/release.yml` builds the plugin, packages the
-bundle, and gates it before publishing:
+Releases are cut by CI from a tag and never by hand. Push `vX.Y.Z` with `Directory.Build.props` bumped in the same commit and `.github/release-notes/vX.Y.Z.md` written, and `.github/workflows/release.yml` builds the plugin, packages the bundle, and gates it before publishing:
 
 | Gate | What it refuses |
 |---|---|
@@ -179,10 +170,7 @@ bundle, and gates it before publishing:
 | `scripts/verify-bundle-privacy.py` | private material in any member, in either encoding |
 | `scripts/verify-published-artifacts.py` | anything the never-publish policy covers |
 
-Every gate then runs again on the artifact downloaded back from the published
-release, and the release is rejected if it carries an asset CI did not build.
-`workflow_dispatch` runs the whole thing without publishing, so a release can be
-rehearsed instead of tagged twice.
+Every gate then runs again on the artifact downloaded back from the published release, and the release is rejected if it carries an asset CI did not build. `workflow_dispatch` runs the whole thing without publishing, so a release can be rehearsed instead of tagged twice.
 
 ## Repository Layout
 
@@ -200,12 +188,12 @@ rehearsed instead of tagged twice.
 
 ## Documentation
 
-- [docs/ADMIN.md](docs/ADMIN.md) — settings, ports, RCON, the HTTP API, health, snapshots
-- [docs/RUNTIME.md](docs/RUNTIME.md) — boot chain, world persistence, save identity, join auth, troubleshooting
-- [docs/MODS.md](docs/MODS.md) — the mod stack, status files, writing your own host mod
-- [runtime/README.md](runtime/README.md) — what the in-game runtime folder contains and how it is staged
-- [vendor/ue4ss/README.md](vendor/ue4ss/README.md) — why the UE4SS runtime is pinned as a file and how to move the pin
-- [protocol/](protocol/) — wire-format contracts (manifest, chat, map, ModKit, installer)
+- [docs/ADMIN.md](docs/ADMIN.md): settings, ports, RCON, the HTTP API, health, snapshots
+- [docs/RUNTIME.md](docs/RUNTIME.md): boot chain, world persistence, save identity, join auth, troubleshooting
+- [docs/MODS.md](docs/MODS.md): the mod stack, status files, writing your own host mod
+- [runtime/README.md](runtime/README.md): what the in-game runtime folder contains and how it is staged
+- [vendor/ue4ss/README.md](vendor/ue4ss/README.md): why the UE4SS runtime is pinned as a file and how to move the pin
+- [protocol/](protocol/): wire-format contracts (manifest, chat, map, ModKit, installer)
 
 ## Community Note
 
@@ -221,4 +209,4 @@ MIT. See [LICENSE](LICENSE).
 
 ## Credits
 
-- [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) — Unreal Engine scripting and modding framework
+- [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS): Unreal Engine scripting and modding framework
