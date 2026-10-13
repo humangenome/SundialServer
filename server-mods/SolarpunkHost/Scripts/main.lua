@@ -2400,6 +2400,10 @@ local function try_install_bld_hook()
                 local k = akey(c)
                 mark_controller_seen(k)
                 SP.transition[k] = os.time()       -- join/load transition in flight
+                -- Invite-code (eos) servers: players arrive with real Epic ids and the game
+                -- keys their records itself; the Sundial-era inventory stamp would point
+                -- every joiner at one shared inventory. Leave the game's own binding alone.
+                if TRANSPORT == "eos" then return end
                 if IDENTITY_MODE == "vanilla" then
                     -- The game's own load runs next: point the blank profile's
                     -- inventory id and the pawn's at the player's inventory first.
@@ -2533,6 +2537,10 @@ local function try_install_save_player_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
+                -- Invite-code (eos) servers: players arrive with real Epic ids and the game
+                -- keys their records itself; the Sundial-era inventory stamp would point
+                -- every joiner at one shared inventory. Leave the game's own binding alone.
+                if TRANSPORT == "eos" then return end
                 if IDENTITY_MODE == "vanilla" then
                     pcall(SR.stamp_vanilla_inventory, c, k, "pre-save")
                     return
@@ -2592,6 +2600,10 @@ local function try_install_apply_inventory_hook()
                 if not c or not c:IsValid() then return end
                 if c:IsLocalPlayerController() then return end
                 local k = akey(c)
+                -- Invite-code (eos) servers: players arrive with real Epic ids and the game
+                -- keys their records itself; the Sundial-era inventory stamp would point
+                -- every joiner at one shared inventory. Leave the game's own binding alone.
+                if TRANSPORT == "eos" then return end
                 if IDENTITY_MODE == "vanilla" then
                     pcall(SR.stamp_vanilla_inventory, c, k, "pre-inventory-apply")
                     return
