@@ -98,6 +98,7 @@ jobs:
           head -c 2000000 /dev/urandom > "$rt/UE4SS.dll"
           echo "x" > "$rt/dwmapi.dll"
           head -c 100000 /dev/urandom > "$rt/SolarpunkPlugin.dll"
+          head -c 100000 /dev/urandom > "$rt/SolarpunkEosIdentity.dll"
           cp runtime/UE4SS-settings.ini "$rt/UE4SS-settings.ini"
           cp runtime/UE4SS_Signatures/*.lua "$rt/UE4SS_Signatures/"
           cp runtime/Mods/mods.txt "$rt/Mods/mods.txt"

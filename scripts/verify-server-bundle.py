@@ -38,6 +38,7 @@ REQUIRED_ENTRIES = (
     RT + "/dwmapi.dll",
     RT + "/UE4SS-settings.ini",
     RT + "/SolarpunkPlugin.dll",
+    RT + "/SolarpunkEosIdentity.dll",
     RT + "/Mods/mods.txt",
     RT + "/Mods/SolarpunkServerRuntime/Scripts/main.lua",
     RT + "/Mods/SolarpunkHost/Scripts/main.lua",

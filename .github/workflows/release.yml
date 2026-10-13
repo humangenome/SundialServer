@@ -252,6 +252,19 @@ jobs:
           done
           echo "plugin carries its source diagnostics"
 
+      - name: Build SolarpunkEosIdentity.dll
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash native/SolarpunkEosIdentity/build.sh
+          dll=native/SolarpunkEosIdentity/SolarpunkEosIdentity.dll
+          for marker in 'SP_EOS_IDENTITY_FILE' 'ss_eos_identity.cred' 'EOSSDK-Win64-Shipping.dll'; do
+            if ! LC_ALL=C grep -aqF "$marker" "$dll"; then
+              echo "::error::SolarpunkEosIdentity.dll does not contain \"$marker\" - it is not a build of this source"
+              exit 1
+            fi
+          done
+
       - name: Package the bundle
         run: bash scripts/package-server.sh "${TAG}"
 

@@ -60,6 +60,15 @@ fi
 cp "$PLUGIN_DLL" "$RT/SolarpunkPlugin.dll"
 echo "    native plugin staged OK"
 
+EOSID_DLL="$HERE/native/SolarpunkEosIdentity/SolarpunkEosIdentity.dll"
+if [[ ! -f "$EOSID_DLL" ]]; then
+  echo "    !! SolarpunkEosIdentity.dll not found at $EOSID_DLL" >&2
+  echo "    !! Build it (native/SolarpunkEosIdentity/build.sh) before packaging." >&2
+  exit 1
+fi
+cp "$EOSID_DLL" "$RT/SolarpunkEosIdentity.dll"
+echo "    Epic identity store staged OK"
+
 echo "==> Staging UE4SS runtime binaries (UE4SS.dll + dwmapi.dll)"
 if [[ -z "${UE4SS_RUNTIME_DIR:-}" && -z "${UE4SS_ZIP_URL:-}" \
       && -f "$HERE/vendor/ue4ss/UE4SS.dll" && -f "$HERE/vendor/ue4ss/dwmapi.dll" ]]; then
