@@ -170,11 +170,10 @@ end
 -- callbacks in the same lua_State. On UE4SS-on-UE5.7 (build 23659698) that
 -- raced ~25s-2min after a client join into varied CRT AbortHandler / hook-
 -- dispatch AV crashes. The fix:
---   * ONE LoopAsync trampoline (250ms) whose only async-thread work is
---     queueing ExecuteInGameThread(runner). Every mod registers periodic
---     tasks here instead of owning a LoopAsync; ALL real work (native
---     object access, file I/O, RegisterHook) is serialized on the game
---     thread.
+--   * ONE native game-thread timer (250ms). An async trampoline still
+--     allocates Lua callback state while the game thread is executing Lua.
+--     Keep periodic callbacks entirely on the game thread, including their
+--     scheduling, instead of allocating a new deferred callback every tick.
 --   * ONE BeginLoadData hook (owned by SolarpunkHost — net-id needs it).
 --     SolarpunkAuth no longer registers its own (its 1s sweep enforces).
 --   * SP.transition[addr]: stamped by the hook on every BeginLoadData fire;
@@ -250,12 +249,7 @@ local function sched_runner()
     end
 end
 
--- The ONLY async-thread Lua in the whole stack: queue the runner.
-LoopAsync(TICK_MS, function()
-    ExecuteInGameThread(sched_runner)
-    return false
-end)
-log("game-thread scheduler started (tick " .. TICK_MS .. "ms)")
+assert(type(LoopInGameThreadWithDelay) == "function", "The pinned runtime must provide game-thread timers")
 
 -- ---------------------------------------------------------------------------
 -- Load modules in order. A module failure logs + records but does NOT abort
@@ -311,3 +305,7 @@ end)
 
 log("server module load complete: loaded=" .. table.concat(loaded, ",") ..
     (#failed > 0 and (" failed=" .. table.concat(failed, ",")) or ""))
+
+-- Start only after every module has finished registering its tasks.
+log("game-thread scheduler starting (tick " .. TICK_MS .. "ms)")
+LoopInGameThreadWithDelay(TICK_MS, sched_runner)

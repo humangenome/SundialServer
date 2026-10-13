@@ -68,6 +68,9 @@ jobs:
             exit 1
           fi
 
+      - name: Runtime scheduling and heartbeat recovery
+        run: lua5.4 tests/runtime-scheduler.lua
+
   # The bundle guard is the last thing standing between an incomplete build and
   # a pinned artifact, so it gets its own regression test. Two things are
   # checked: a bundle shaped exactly like the real one passes, and the same
