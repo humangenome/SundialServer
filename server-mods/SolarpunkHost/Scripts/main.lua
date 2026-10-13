@@ -124,6 +124,13 @@ local HOST_IDENTITY_SEED = "sp-host"
 local INSTANCE_DIR = SP_DIR and SP_DIR:match("^(.*)[\\/]SolarpunkServer$")
 local SAVE_GAMES_DIR = INSTANCE_DIR and (INSTANCE_DIR .. "\\UserDir\\Saved\\SaveGames") or nil
 local SAVE_INTERVAL_S = 300
+-- Transport. "ip" (default): swap the game's net driver for IpNetDriver so the
+-- host listens on its UDP game port and the Sundial app joins by IP. "eos":
+-- leave the game's own Epic Online Services net driver in place, so players
+-- join with the game's invite code and nothing else installed. Solarpunk
+-- 1.3.0 (Steam build 25624214) moved multiplayer to EOS; an app client on
+-- that build is refused by an EOS host ("incompatible_unique_net_id").
+local TRANSPORT = "ip"
 if SP_DIR then
     LOG_DIR = SP_DIR .. "\\logs"
     os.execute('mkdir "' .. LOG_DIR .. '" >NUL 2>NUL')
@@ -138,6 +145,8 @@ if SP_DIR then
     end
     local s = extract_json_number(body, "SaveIntervalSeconds")
     if s and s >= 30 then SAVE_INTERVAL_S = s end
+    local t = extract_json_string(body, "Transport")
+    if t and t:lower() == "eos" then TRANSPORT = "eos" end
     local instance_id = extract_json_string(body, "InstanceId")
     if instance_id and instance_id ~= "" then
         instance_id = instance_id:gsub("[^%w%-%_]", ""):sub(1, 60)
@@ -146,6 +155,7 @@ if SP_DIR then
     log("config: SolarpunkServer dir=" .. SP_DIR .. " WorldName=" .. WORLD_NAME ..
         " SaveIntervalSeconds=" .. SAVE_INTERVAL_S ..
         " HostIdentitySeed=" .. HOST_IDENTITY_SEED ..
+        " Transport=" .. TRANSPORT ..
         " SaveGamesDir=" .. tostring(SAVE_GAMES_DIR))
 else
     log("config: SolarpunkServer dir not found; defaults WorldName=" .. WORLD_NAME)
@@ -2683,9 +2693,12 @@ SP.every("host-boot", 1000, 0, function()
     try_install_apply_inventory_hook()
     normalize_save_games_dir("pre-host")
 
-    -- transport: force IpNetDriver so the headless host binds real UDP
+    -- transport: force IpNetDriver so the headless host binds real UDP,
+    -- unless the server joins by invite code through the game's own EOS driver.
     local eng = FindFirstOf("GameEngine")
-    pcall(function()
+    if TRANSPORT == "eos" then
+        log("transport=eos: keeping the game's own net driver; players join with the invite code")
+    else pcall(function()
         local defs = eng.NetDriverDefinitions
         for i = 1, defs:GetArrayNum() do
             local d = defs[i]
@@ -2694,7 +2707,7 @@ SP.every("host-boot", 1000, 0, function()
                 d.DriverClassNameFallback = FName("/Script/OnlineSubsystemUtils.IpNetDriver")
             end
         end
-    end)
+    end) end
 
     pcall(function() gi:HostGame() end)
     log("HostGame() called (world=" .. WORLD_NAME .. ")")
