@@ -59,6 +59,9 @@ jobs:
           done
           exit $status
 
+      - name: Lua regression tests
+        run: lua5.4 tests/world-upload-choice.lua
+
       - name: The orchestrator is the only enabled mod
         run: |
           enabled="$(grep -oE '^[A-Za-z0-9_]+[[:space:]]*:[[:space:]]*1' runtime/Mods/mods.txt | grep -oE '^[A-Za-z0-9_]+' | grep '^Solarpunk' || true)"

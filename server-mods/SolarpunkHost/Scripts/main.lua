@@ -1,6 +1,6 @@
--- SolarpunkHost: transport swap, named persistent world, HostGame,
--- load-transition observation and host status. The client supplies its
--- character identity; the game owns character and inventory persistence.
+-- SolarpunkHost: the headless host pipeline. Transport swap -> named
+-- persistent world -> HostGame -> per-player net-id save/load keying ->
+-- periodic world save -> host status file.
 --
 -- This is host_netid_enforcer.lua (the proven transport+net-id base, kept
 -- verbatim where possible — see that file for the full root-cause notes)
@@ -131,6 +131,11 @@ local SAVE_INTERVAL_S = 300
 -- 1.3.0 (Steam build 25624214) moved multiplayer to EOS; an app client on
 -- that build is refused by an EOS host ("incompatible_unique_net_id").
 local TRANSPORT = "ip"
+-- "SeparateServerRecord": "on" (eos servers only): keep the hidden server player off a
+-- player's saved character (see separate_server_record). Off by default: it rewrites the
+-- saved-players array, which crashed the game twice with the older bundled UE4SS build
+-- (09a06d70) and ran clean with the fixed one (2ad348bf). Turn it on only with the fixed build.
+local SEPARATE_SERVER_RECORD = false
 if SP_DIR then
     LOG_DIR = SP_DIR .. "\\logs"
     os.execute('mkdir "' .. LOG_DIR .. '" >NUL 2>NUL')
@@ -147,6 +152,8 @@ if SP_DIR then
     if s and s >= 30 then SAVE_INTERVAL_S = s end
     local t = extract_json_string(body, "Transport")
     if t and t:lower() == "eos" then TRANSPORT = "eos" end
+    local ssr = extract_json_string(body, "SeparateServerRecord")
+    if ssr and ssr:lower() == "on" then SEPARATE_SERVER_RECORD = true end
     local instance_id = extract_json_string(body, "InstanceId")
     if instance_id and instance_id ~= "" then
         instance_id = instance_id:gsub("[^%w%-%_]", ""):sub(1, 60)
@@ -155,7 +162,7 @@ if SP_DIR then
     log("config: SolarpunkServer dir=" .. SP_DIR .. " WorldName=" .. WORLD_NAME ..
         " SaveIntervalSeconds=" .. SAVE_INTERVAL_S ..
         " HostIdentitySeed=" .. HOST_IDENTITY_SEED ..
-        " Transport=" .. TRANSPORT ..
+        " Transport=" .. TRANSPORT .. " SeparateServerRecord=" .. tostring(SEPARATE_SERVER_RECORD) ..
         " SaveGamesDir=" .. tostring(SAVE_GAMES_DIR))
 else
     log("config: SolarpunkServer dir not found; defaults WorldName=" .. WORLD_NAME)
@@ -503,6 +510,37 @@ local mirror_log = {}
 -- whenever the slot file changed recently.
 local last_world_change_at = 0
 local last_world_bytes = nil
+-- BEGIN world_upload_choice (pure Lua; tests/world-upload-choice.lua loads this block)
+-- A customer's upload must become the world even when its file time is older
+-- than the host's own copies: FTP programs keep the original time (FileZilla
+-- does by default), so "newest by file time" let the host's copy win and the
+-- upload was archived unloaded (2026-10-13). The host remembers a fingerprint of
+-- every save it wrote or adopted; a .sav whose content it has never seen is a
+-- fresh upload, and the newest by creation time (when it landed here) wins.
+local WU = {}
+function WU.fnv1a64(data)
+    local h = 0xcbf29ce484222325
+    local prime = 0x100000001b3
+    local n = #data
+    for i = 1, n, 4096 do
+        local bytes = { data:byte(i, math.min(i + 4095, n)) }
+        for j = 1, #bytes do h = (h ~ bytes[j]) * prime end
+    end
+    return string.format("%016x", h)
+end
+function WU.fingerprint(data)
+    if not data or #data == 0 then return nil end
+    return tostring(#data) .. ":" .. WU.fnv1a64(data)
+end
+-- candidates: { {name=, fp=}, ... } newest creation time first; known: set of fingerprints
+function WU.choose(candidates, known)
+    for _, c in ipairs(candidates or {}) do
+        if c.fp and not known[c.fp] then return c end
+    end
+    return nil
+end
+-- END world_upload_choice
+
 local function latest_relevant_save_name()
     if not SAVE_GAMES_DIR then return nil end
     local p = io.popen('dir /b /a-d /o-d "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
@@ -536,6 +574,96 @@ local function latest_active_world_save()
     return nil
 end
 
+WU.max = 300
+WU.known = nil
+function WU.ledger_path()
+    return SAVE_GAMES_DIR and (SAVE_GAMES_DIR .. "\\sundial-world-ledger.txt") or nil
+end
+function WU.ledger_load()
+    if WU.known then return WU.known, true end
+    WU.known = {}
+    local path = WU.ledger_path()
+    local f = path and io.open(path, "r")
+    if not f then return WU.known, false end
+    for line in f:lines() do
+        local fp = line:match("^(%d+:%x+)")
+        if fp then WU.known[fp] = true end
+    end
+    f:close()
+    return WU.known, true
+end
+function WU.ledger_add(fp)
+    if not fp then return end
+    local known = WU.ledger_load()
+    if known[fp] then return end
+    known[fp] = true
+    local path = WU.ledger_path()
+    if not path then return end
+    local lines = {}
+    local f = io.open(path, "r")
+    if f then for line in f:lines() do lines[#lines + 1] = line end f:close() end
+    lines[#lines + 1] = fp .. " " .. os.date("%Y-%m-%d %H:%M:%S")
+    while #lines > WU.max do table.remove(lines, 1) end
+    local w = io.open(path .. ".tmp", "w")
+    if not w then return end
+    w:write(table.concat(lines, "\n") .. "\n")
+    w:close()
+    os.remove(path)
+    os.rename(path .. ".tmp", path)
+end
+-- Pre-host: a customer upload becomes the world, whatever its file time.
+-- Returns true when it replaced the world (the previous world is kept aside).
+function WU.adopt()
+    if not SAVE_GAMES_DIR then return false end
+    local known, had_ledger = WU.ledger_load()
+    local world_path = SAVE_GAMES_DIR .. "\\" .. WORLD_NAME .. ".sav"
+    local world_data = file_exists(world_path) and read_all(world_path) or nil
+    if not had_ledger then
+        -- first boot with the ledger: what is the world now is the host's own
+        WU.ledger_add(WU.fingerprint(world_data))
+    end
+    local p = io.popen('dir /b /a-d /o-d /t:c "' .. SAVE_GAMES_DIR .. '\\*.sav" 2>NUL')
+    if not p then return false end
+    local world_lower = (WORLD_NAME .. ".sav"):lower()
+    local candidates = {}
+    for name in p:lines() do
+        local lower = tostring(name or ""):lower()
+        if lower ~= world_lower and lower ~= "gp_data.sav" and lower ~= "options.sav" then
+            local data = read_all(SAVE_GAMES_DIR .. "\\" .. name)
+            candidates[#candidates + 1] = { name = name, fp = WU.fingerprint(data), data = data }
+        end
+    end
+    p:close()
+    local world_fp = WU.fingerprint(world_data)
+    local choice = WU.choose(candidates, known)
+    if not choice or choice.fp == world_fp then
+        for _, c in ipairs(candidates) do WU.ledger_add(c.fp) end
+        return false
+    end
+    local kept = nil
+    if world_data then
+        local archive_dir = SAVE_GAMES_DIR .. "\\_sundial_orphaned_saves"
+        os.execute('mkdir "' .. archive_dir .. '" >NUL 2>NUL')
+        kept = archive_dir .. "\\" .. os.date("%Y%m%d%H%M%S") .. "-previous-" .. WORLD_NAME .. ".sav"
+        local b = io.open(kept, "wb")
+        if b then b:write(world_data) b:close() else kept = nil end
+    end
+    local tmp = world_path .. ".tmp"
+    local f = io.open(tmp, "wb")
+    if not f then log("customer upload " .. choice.name .. " could not be written as the world") return false end
+    f:write(choice.data)
+    f:close()
+    os.remove(world_path)
+    local ok = os.rename(tmp, world_path)
+    if not ok then os.remove(tmp) return false end
+    last_world_bytes = choice.data
+    last_world_change_at = os.time()
+    for _, c in ipairs(candidates) do WU.ledger_add(c.fp) end
+    log("customer upload " .. choice.name .. " (" .. #choice.data .. " bytes) is the world now; previous world kept as " ..
+        tostring(kept))
+    return true
+end
+
 local function mirror_active_world_save(reason)
     if not SAVE_GAMES_DIR then return false end
     local source_name = latest_active_world_save()
@@ -556,6 +684,7 @@ local function mirror_active_world_save(reason)
     os.remove(dst)
     local ok = os.rename(tmp, dst)
     if not ok then os.remove(tmp) end
+    if ok then WU.ledger_add(WU.fingerprint(data)) end
     local key = tostring(source_name) .. ":" .. tostring(#data) .. ":" .. tostring(ok)
     if not mirror_log[key] then
         mirror_log[key] = true
@@ -601,7 +730,13 @@ local function archive_orphaned_world_saves(reason)
 end
 
 local function normalize_save_games_dir(reason)
-    local mirrored = mirror_active_world_save(reason)
+    local adopted = false
+    if tostring(reason or "") == "pre-host" then
+        local ok, res = pcall(WU.adopt)
+        adopted = ok and res or false
+        if not ok then log("customer upload check failed: " .. tostring(res)) end
+    end
+    local mirrored = (not adopted) and mirror_active_world_save(reason) or false
     -- Mid-session: leave engine-generated world slot files in place. The game
     -- can continue probing its original slot after we mirror it to World1.sav;
     -- moving it causes missing-save reads during joins.
@@ -2361,6 +2496,8 @@ local function log_vanilla_profile()
         tostring(scan.profile_i) .. " inv=" .. tostring(scan.profile_inv) ..
         (scan.profile_i and "" or " (none yet; the game makes one on the first join)"))
 end
+    SR.stamp_vanilla_inventory = stamp_vanilla_inventory
+    SR.align_vanilla_record = align_vanilla_record
     SR.log_vanilla_profile = log_vanilla_profile
     SR.swap_saved_player_key = swap_saved_player_key
     SR.restore_stale_key_swaps = restore_stale_key_swaps
@@ -2390,30 +2527,263 @@ local function try_install_bld_hook()
     if ld_hooked then return end
     ld_tries = ld_tries + 1
     local ok = pcall(function()
-        -- Blueprint callbacks are post-hooks. Observe the completed load only;
-        -- the client supplies its stable identity before the request is sent.
-        -- Re-keying a profile, stamping an inventory, or replaying this request
-        -- after the game ran it can detach the client from its actual inventory.
-        RegisterHook(BLD_CLASS .. ":BeginLoadData", function(self, player_id)
-            local c = self:get()
-            if not c or not c:IsValid() or c:IsLocalPlayerController() then return end
-            local k = akey(c)
-            mark_controller_seen(k)
-            SP.transition[k] = os.time()
-            local id = player_id:get():ToString()
-            if is_blank_id(id) then
-                log("player load used a placeholder identity; update the client app before reconnecting")
-            else
-                log("player load completed with client identity=" .. tostring(id))
-            end
+        RegisterHook(BLD_CLASS .. ":BeginLoadData", function(self, p1)
+            pcall(function()
+                local c = self:get()
+                if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
+                local k = akey(c)
+                mark_controller_seen(k)
+                SP.transition[k] = os.time()       -- join/load transition in flight
+                -- Invite-code (eos) servers: players arrive with real Epic ids and the game
+                -- keys their records itself; the Sundial-era inventory stamp would point
+                -- every joiner at one shared inventory. Leave the game's own binding alone.
+                if TRANSPORT == "eos" then return end
+                if IDENTITY_MODE == "vanilla" then
+                    -- The game's own load runs next: point the blank profile's
+                    -- inventory id and the pawn's at the player's inventory first.
+                    pcall(SR.align_vanilla_record, c, k, "begin-load")
+                    pcall(SR.stamp_vanilla_inventory, c, k, "begin-load")
+                    return
+                end
+                local key = ""
+                pcall(function() key = p1:get():ToString() end)
+                local sid, name_label = load_sid_for_controller(c, k)
+                if is_blank_id(key) then
+                    -- Writing the parameter here does not reach the Blueprint VM
+                    -- (re-proven 2026-09-07: the readback showed the new value and the
+                    -- game still ran the load with the blank key). The corrected load is
+                    -- re-issued from the tick below; see the dead-end list in the
+                    -- keying section.
+                    if SR.swap_saved_player_key(k, sid, key) then
+                        -- The game's own load now returns the player's record, and
+                        -- so does its follow-up lookup by the same blank key ~30 ms
+                        -- later, which is what binds the client's inventory id. A
+                        -- re-issued load would have to undo the swap first and the
+                        -- follow-up then found the blank record instead (seen
+                        -- 2026-09-08: client bound to the blank record's inventory).
+                        -- So: no re-issue. The swap is undone at the first save or
+                        -- after two seconds, whichever comes first.
+                        loaded_sid[k] = sid
+                        load_reissued_sid[k] = sid
+                        pending[k] = nil
+                        if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                        stamp_unique_player_id(c, sid, "begin-load-swapped")
+                        return
+                    end
+                    if recovered_load_already(k, sid) then
+                        reject_remote_identity(c, k, key, sid, "blank-load-key", true)
+                        mark_invalid_identity_recovered(k, sid, name_label)
+                        clear_invalid_identity_if_auth_recovered(k)
+                        stamp_unique_player_id(c, sid, "begin-load-recover-blank-key-duplicate")
+                    elseif sid then
+                        reject_remote_identity(c, k, key, sid, "blank-load-key", true)
+                        if schedule_begin_load_recovery(c, k, key, sid, name_label, "blank-load-key") then
+                            mark_invalid_identity_recovered(k, sid, name_label)
+                            clear_invalid_identity_if_auth_recovered(k)
+                            stamp_unique_player_id(c, sid, "begin-load-recover-blank-key")
+                        end
+                    else
+                        reject_remote_identity(c, k, key, sid, "blank-load-key")
+                    end
+                    return
+                end
+                if isSynth(key) then
+                    if sid and key ~= sid then
+                        reject_remote_identity(c, k, key, sid, "synthetic-key-mismatch")
+                        return
+                    end
+                    loaded_sid[k] = key
+                    pending[k] = nil
+                    if SP.invalid_identity then SP.invalid_identity[k] = nil end
+                    stamp_unique_player_id(c, key, "begin-load-valid")
+                else
+                    if recovered_load_already(k, sid) then
+                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key", true)
+                        mark_invalid_identity_recovered(k, sid, name_label)
+                        clear_invalid_identity_if_auth_recovered(k)
+                        stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key-duplicate")
+                    elseif sid then
+                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key", true)
+                        if schedule_begin_load_recovery(c, k, key, sid, name_label, "non-synthetic-load-key") then
+                            mark_invalid_identity_recovered(k, sid, name_label)
+                            clear_invalid_identity_if_auth_recovered(k)
+                            stamp_unique_player_id(c, sid, "begin-load-recover-non-synthetic-key")
+                        end
+                    else
+                        reject_remote_identity(c, k, key, sid, "non-synthetic-load-key")
+                    end
+                end
+            end)
+        end, function(self)
+            pcall(function()
+                local c = self:get()
+                if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
+                local k = akey(c)
+                mark_controller_seen(k)
+                SP.transition[k] = os.time()
+            end)
         end)
     end)
     if ok then
         ld_hooked = true
-        log("BeginLoadData observation hook installed (attempt " .. ld_tries .. ")")
+        log("BeginLoadData hook installed (attempt " .. ld_tries .. ")")
     elseif ld_tries >= 60 then
-        ld_hooked = true
-        log("BeginLoadData observation hook FAILED after " .. ld_tries .. " tries")
+        ld_hooked = true -- stop retrying
+        log("BeginLoadData hook FAILED after " .. ld_tries .. " tries")
+    end
+end
+
+local save_player_hooked, save_player_tries = false, 0
+local function save_sid_for_controller(c)
+    if not (c and c:IsValid()) then return nil end
+    -- The listen-server's local controller is not a real customer player. If we
+    -- stamp or re-save it, the game can persist customer state under host-local.
+    if c:IsLocalPlayerController() then return nil end
+    local k = akey(c)
+    local locked = locked_sid_for_controller(k)
+    if locked then
+        local nm = stable_pname(c, k)
+        local desired = nm and synthId(nm) or nil
+        if desired and desired ~= locked then
+            local log_key = tostring(k) .. ":" .. tostring(locked) .. ":" .. tostring(desired) .. ":save"
+            if not sid_lock_log[log_key] then
+                sid_lock_log[log_key] = true
+                log("save identity using locked load sid [" .. tostring(k) ..
+                    "] sid=" .. tostring(locked) ..
+                    " ignoring_later_name=" .. tostring(nm) ..
+                    " later_sid=" .. tostring(desired))
+            end
+        end
+        return locked
+    end
+    local nm = stable_pname(c, k)
+    if not nm then return trusted_existing_sid(c, k) end
+    return synthId(nm)
+end
+local function try_install_save_player_hook()
+    if save_player_hooked then return end
+    save_player_tries = save_player_tries + 1
+    local ok = pcall(function()
+        RegisterHook(BLD_CLASS .. ":SERVER_SavePlayerdata", function(self, playerdata)
+            pcall(function()
+                local c = self:get()
+                if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
+                local k = akey(c)
+                -- Invite-code (eos) servers: players arrive with real Epic ids and the game
+                -- keys their records itself; the Sundial-era inventory stamp would point
+                -- every joiner at one shared inventory. Leave the game's own binding alone.
+                if TRANSPORT == "eos" then return end
+                if IDENTITY_MODE == "vanilla" then
+                    pcall(SR.stamp_vanilla_inventory, c, k, "pre-save")
+                    return
+                end
+                restore_saved_player_key(k, "pre-save")
+                SR.repair_saved_player_ids("pre-save")
+                if SP.kicked[k] then return end
+                if SP.invalid_identity and SP.invalid_identity[k] then
+                    local recovered_sid = invalid_identity_recovered_sid(k)
+                    if recovered_sid then
+                        stamp_persistence_ids(c, recovered_sid, "pre-save-recovered-invalid-identity")
+                        stamp_playerdata_param(playerdata, recovered_sid, "pre-save-recovered-invalid-identity")
+                        return
+                    end
+                    quarantine_unowned_save(c, k, "pre-save-invalid-identity")
+                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-invalid-identity")
+                    return
+                end
+                local sid = save_sid_for_controller(c)
+                if not sid then
+                    quarantine_unowned_save(c, k, "pre-save-no-sid")
+                    stamp_playerdata_param(playerdata, HOST_SYNTH_ID, "pre-save-no-sid")
+                    return
+                end
+                stamp_persistence_ids(c, sid, "pre-save")
+                stamp_playerdata_param(playerdata, sid, "pre-save")
+            end)
+        end, function(self)
+            pcall(function()
+                local c = self and self:get()
+                if not (c and c:IsValid()) then return end
+                if c:IsLocalPlayerController() then return end
+                if IDENTITY_MODE == "vanilla" then return end
+                if controller_blocked(akey(c)) then return end
+                local sid = save_sid_for_controller(c)
+                if sid then stamp_persistence_ids(c, sid, "post-save") end
+            end)
+        end)
+    end)
+    if ok then
+        save_player_hooked = true
+        log("SERVER_SavePlayerdata hook installed (attempt " .. save_player_tries .. ")")
+    elseif save_player_tries >= 60 then
+        save_player_hooked = true
+        log("SERVER_SavePlayerdata hook FAILED after " .. save_player_tries .. " tries")
+    end
+end
+
+local inventory_apply_hooked, inventory_apply_tries = false, 0
+local function try_install_apply_inventory_hook()
+    if inventory_apply_hooked then return end
+    inventory_apply_tries = inventory_apply_tries + 1
+    local ok = pcall(function()
+        RegisterHook(BLD_CLASS .. ":SERVER_Net_ApplyAndSaveInventory", function(self, inventory)
+            pcall(function()
+                local c = self:get()
+                if not c or not c:IsValid() then return end
+                if c:IsLocalPlayerController() then return end
+                local k = akey(c)
+                -- Invite-code (eos) servers: players arrive with real Epic ids and the game
+                -- keys their records itself; the Sundial-era inventory stamp would point
+                -- every joiner at one shared inventory. Leave the game's own binding alone.
+                if TRANSPORT == "eos" then return end
+                if IDENTITY_MODE == "vanilla" then
+                    pcall(SR.stamp_vanilla_inventory, c, k, "pre-inventory-apply")
+                    return
+                end
+                if SP.kicked[k] then return end
+                if SP.invalid_identity and SP.invalid_identity[k] then
+                    local recovered_sid = invalid_identity_recovered_sid(k)
+                    if recovered_sid then
+                        stamp_persistence_ids(c, recovered_sid, "pre-inventory-recovered-invalid-identity")
+                        stamp_inventory_param(inventory, recovered_sid, "pre-inventory-recovered-invalid-identity")
+                        return
+                    end
+                    quarantine_unowned_save(c, k, "pre-inventory-invalid-identity")
+                    stamp_inventory_param(inventory, HOST_SYNTH_ID, "pre-inventory-invalid-identity")
+                    return
+                end
+                local sid = save_sid_for_controller(c)
+                if not sid then
+                    quarantine_unowned_save(c, k, "pre-inventory-no-sid")
+                    stamp_inventory_param(inventory, HOST_SYNTH_ID, "pre-inventory-no-sid")
+                    return
+                end
+                stamp_persistence_ids(c, sid, "pre-inventory-apply")
+                stamp_inventory_param(inventory, sid, "pre-inventory-apply")
+            end)
+        end, function(self)
+            pcall(function()
+                local c = self and self:get()
+                if not (c and c:IsValid()) then return end
+                if c:IsLocalPlayerController() then return end
+                if IDENTITY_MODE == "vanilla" then return end
+                if controller_blocked(akey(c)) then return end
+                local sid = save_sid_for_controller(c)
+                if sid then stamp_persistence_ids(c, sid, "post-inventory-apply") end
+            end)
+        end)
+    end)
+    if ok then
+        inventory_apply_hooked = true
+        log("SERVER_Net_ApplyAndSaveInventory hook installed (attempt " ..
+            inventory_apply_tries .. ")")
+    elseif inventory_apply_tries >= 60 then
+        inventory_apply_hooked = true
+        log("SERVER_Net_ApplyAndSaveInventory hook FAILED after " ..
+            inventory_apply_tries .. " tries")
     end
 end
 
@@ -2448,6 +2818,128 @@ end
 -- Boot: GI found -> world name -> transport swap -> host. All on the game
 -- thread via the shared scheduler (FindFirstOf/RegisterHook off-thread was
 -- part of the crash surface).
+-- ---------------------------------------------------------------------------
+-- Invite-code (eos) servers: the hidden server player never takes a player's
+-- character. Solarpunk 1.3.0 treats saved record 1 as the hosting player's:
+-- GetSavedHostUserID returns its id, and Fix Player ID re-keys it to whoever
+-- hosts. In a world a customer uploads, record 1 is the owner's character, so
+-- the server's own player took it and a returning owner shared one inventory
+-- with it (measured in a lab, 2026-10-13). Once per world the first record is
+-- copied to the front with a fresh inventory id; GetSavedHostUserID then
+-- reports "no saved host", the game re-keys the copy to the server's own id,
+-- and the real record keeps its owner, inventory and spot. A marker file
+-- beside the save remembers the server's record by its inventory id. Only
+-- numbers are written into records (the inventory id); the copy itself is the
+-- engine's own struct copy.
+-- ---------------------------------------------------------------------------
+local server_record_hooked, server_record_done, server_record_pending = false, false, false
+local function server_record_marker()
+    if not SAVE_GAMES_DIR then return nil end
+    return SAVE_GAMES_DIR .. "\\sundial-server-record-" .. WORLD_NAME .. ".txt"
+end
+local function server_record_read_marker()
+    local path = server_record_marker()
+    local f = path and io.open(path, "r")
+    if not f then return nil end
+    local line = f:read("*l"); f:close()
+    return normalize_hex32(line)
+end
+local function server_record_write_marker(hex)
+    local path = server_record_marker()
+    if not path or not hex then return false end
+    local f = io.open(path .. ".tmp", "w")
+    if not f then return false end
+    f:write(hex .. "\n"); f:close()
+    os.remove(path)
+    return os.rename(path .. ".tmp", path) ~= nil
+end
+local function server_record_fresh_hex()
+    math.randomseed(os.time() + math.floor((os.clock() % 1) * 1000000))
+    local parts = {}
+    for i = 1, 4 do parts[i] = string.format("%08x", math.random(0, 0xFFFF) * 0x10000 + math.random(0, 0xFFFF)) end
+    return table.concat(parts)
+end
+local function separate_server_record()
+    local arr = SR.saved_players_array()
+    if not arr then log("server record: no saved world yet") return end
+    local n = 0
+    pcall(function() n = arr:GetArrayNum() end)
+    if n < 1 then
+        server_record_pending = true
+        log("server record: new world; the server's own record will be the first")
+        return
+    end
+    local invf = SR.saved_player_inv_field(arr[1])
+    if not invf then log("server record: record layout not recognised, left alone") return end
+    local first_inv = normalize_hex32(read_guid_prop(arr[1], invf))
+    local marker = server_record_read_marker()
+    if marker and first_inv == marker then
+        log("server record: record 1 is already the server's (inventory " .. tostring(first_inv) .. ")")
+        return
+    end
+    local first_id = SR.read_saved_player_id(arr[1], SR.saved_player_id_field(arr[1]) or "PlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363")
+    local save = FindFirstOf("BPC_SaveManager_C").CachedSave
+    local copy = { arr[1] }
+    for i = 1, n do copy[#copy + 1] = arr[i] end
+    save.SavedPlayers = copy
+    copy = nil
+    local arr2 = SR.saved_players_array()
+    local hex = server_record_fresh_hex()
+    local ok = false
+    pcall(function()
+        local v = arr2[1][invf]
+        if assign_guid_value(v, hex) then arr2[1][invf] = v end
+        ok = normalize_hex32(read_guid_prop(arr2[1], invf)) == hex
+    end)
+    if not ok then
+        -- Never leave a copy that shares the owner's inventory: undo it.
+        pcall(function()
+            local back = {}
+            for i = 2, arr2:GetArrayNum() do back[#back + 1] = arr2[i] end
+            save.SavedPlayers = back
+        end)
+        log("server record: inventory id write did not land; copy removed, world left as it was")
+    end
+    local count = 0
+    pcall(function() count = SR.saved_players_array():GetArrayNum() end)
+    if ok then server_record_write_marker(hex) end
+    log("server record: record 1 (" .. tostring(first_id) .. ") copied to the front with its own inventory " ..
+        hex .. " ok=" .. tostring(ok) .. "; records " .. n .. " -> " .. count)
+end
+local function try_install_server_record_hook(gi)
+    if server_record_hooked or TRANSPORT ~= "eos" or not SEPARATE_SERVER_RECORD then return end
+    local cpath = nil
+    pcall(function() cpath = gi:GetClass():GetFullName():match("^%S+%s+(.+)$") end)
+    if not cpath then return end
+    local ok, err = pcall(function()
+        RegisterHook(cpath .. ":GetSavedHostUserID", function(self, user_id, available)
+            if not server_record_done then
+                server_record_done = true
+                local okf, errf = pcall(separate_server_record)
+                if not okf then log("server record: FAILED " .. tostring(errf)) end
+            end
+            pcall(function() user_id:set("") end)
+            pcall(function() available:set(false) end)
+        end)
+    end)
+    server_record_hooked = ok
+    log("server record hook " .. (ok and "installed" or ("FAILED " .. tostring(err))))
+end
+-- A new world: once the server's own record exists, remember it.
+SP.every("host-server-record-marker", 5000, 2500, function()
+    if not server_record_pending then return end
+    local arr = SR.saved_players_array()
+    local n = 0
+    if arr then pcall(function() n = arr:GetArrayNum() end) end
+    if n < 1 then return end
+    local invf = SR.saved_player_inv_field(arr[1])
+    local hex = invf and normalize_hex32(read_guid_prop(arr[1], invf))
+    if hex and not is_blank_guid(hex) and server_record_write_marker(hex) then
+        server_record_pending = false
+        log("server record: new world's first record is the server's (inventory " .. hex .. ")")
+    end
+end)
+
 SP.every("host-boot", 1000, 0, function()
     if hosted then return end
     local gi = FindFirstOf("BP_SkyGameInstance_C")
@@ -2466,6 +2958,8 @@ SP.every("host-boot", 1000, 0, function()
     try_install_save_slot_hooks()
     try_install_savemgr_hooks()        -- install BEFORE HostGame so the boot world-load slot is rewritten to World1
     try_install_bld_hook()
+    try_install_save_player_hook()
+    try_install_apply_inventory_hook()
     normalize_save_games_dir("pre-host")
 
     -- transport: force IpNetDriver so the headless host binds real UDP,
@@ -2473,6 +2967,7 @@ SP.every("host-boot", 1000, 0, function()
     local eng = FindFirstOf("GameEngine")
     if TRANSPORT == "eos" then
         log("transport=eos: keeping the game's own net driver; players join with the invite code")
+        try_install_server_record_hook(gi)
     else pcall(function()
         local defs = eng.NetDriverDefinitions
         for i = 1, defs:GetArrayNum() do
@@ -2503,6 +2998,8 @@ end)
 SP.every("host-bld-hook", 1000, 250, function()
     if not hosted then return end
     try_install_bld_hook()
+    try_install_save_player_hook()
+    try_install_apply_inventory_hook()
 end)
 
 SP.every("host-save-slot-hooks", 1000, 250, function()
