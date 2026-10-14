@@ -1,7 +1,7 @@
 # SundialServer admin guide
 
-Raw controls for a self-hosted SundialServer. Managed-hosting customers should
-use their host's panel instead — it drives the same settings.
+Raw controls for a self-hosted SundialServer. If you rent a hosted server, use
+your host's panel instead; it drives the same settings.
 
 ## Server package layout
 
@@ -46,7 +46,7 @@ from that directory. Re-copy after any game update that replaces files in
 `Binaries\Win64`. If `GET /api/v1/health` comes back with `runtime_ready: false`,
 this step is the first thing to re-check.
 
-Managed hosting does this staging for you.
+A rented Survival Servers server does this staging for you.
 
 ## Settings (`SolarpunkServer\appsettings.json`)
 

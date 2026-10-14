@@ -39,7 +39,7 @@ Release builds are self-contained; a separate .NET install is not required for n
 
 ## Installation
 
-### Managed hosting
+### Rent a server
 [SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) ships the complete Sundial server runtime already installed and handles ports, updates, and panel integration.
 
 ### Self-host
@@ -55,7 +55,7 @@ Players connect with the Sundial app to `<host>:<GameplayPort>`.
 
 Server 0.1.90 and later needs Sundial app 0.1.71 or later on every player's PC. Close the game and restart the app so it updates its client runtime before connecting.
 
-> **Note:** the release zip is complete. It bundles the in-game runtime (UE4SS, Sundial's server mods and the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat feed, roster or admin tools. Managed hosting includes the runtime and stages it for you.
+> **Note:** the release zip is complete. It bundles the in-game runtime (UE4SS, Sundial's server mods and the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat feed, roster or admin tools. A rented Survival Servers server includes the runtime and stages it for you.
 
 ## Server Settings
 

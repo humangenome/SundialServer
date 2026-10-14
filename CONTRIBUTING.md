@@ -15,7 +15,7 @@ Open an issue. Include:
 
 Set `Serilog:MinimumLevel` to `Debug` before capturing logs for a boot or join failure. That turns on the per-request HTTP trace and the full `/health` decision breakdown.
 
-If your issue is about specific managed hosting (panel, billing, support), please contact your host directly. SundialServer's GitHub issues are for the open-source server itself.
+If your issue is about a hosted server you rent (panel, billing, support), please contact your host directly. SundialServer's GitHub issues are for the open-source server itself.
 
 ## Feature requests
 
