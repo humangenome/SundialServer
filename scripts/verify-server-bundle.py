@@ -59,6 +59,26 @@ REQUIRED_ENTRIES = (
 # UE4SS.dll is ~16 MB. A truncated or placeholder file is not a runtime.
 MIN_UE4SS_DLL_BYTES = 1_000_000
 
+# The sample mods that come with a stock UE4SS download. None of them belongs on
+# a server: a bundle packed from a full UE4SS zip switches them on with no other
+# change, and on a sibling product they made the game crash in about one start in
+# three. Switched on (a ': 1' line in mods.txt, or an enabled.txt in the mod's
+# folder) fails the bundle, even when the folder is missing (UE4SS skips a listed
+# name with no folder, so the line only waits for a folder to appear); a folder
+# that is present but off is tolerated.
+UE4SS_SAMPLE_MODS = (
+    "ActorDumperMod",
+    "BPML_GenericFunctions",
+    "BPModLoaderMod",
+    "CheatManagerEnablerMod",
+    "ConsoleCommandsMod",
+    "ConsoleEnablerMod",
+    "jsbLuaProfilerMod",
+    "Keybinds",
+    "LineTraceMod",
+    "SplitScreenMod",
+)
+
 # The native identity plugin is ~440 KB.
 MIN_PLUGIN_BYTES = 50_000
 
@@ -175,9 +195,9 @@ def verify(path):
                 "{}".format(len(mod_dirs), RT, MIN_MOD_DIRS, sorted(mod_dirs) or "none")
             )
 
-        # Anything mods.txt switches on has to actually be in the zip, or UE4SS
-        # boots with a mod list that references nothing. Only our own mods are
-        # shipped here; the rest of the list is UE4SS built-ins.
+        # Anything of ours that mods.txt switches on has to actually be in the
+        # zip, or UE4SS boots with a mod list that references nothing. Only our
+        # own mods are shipped here, and a UE4SS sample mod switched on fails.
         try:
             manifest = zf.read(RT + "/Mods/mods.txt").decode("utf-8-sig", "replace")
         except KeyError:
@@ -186,6 +206,13 @@ def verify(path):
             manifest = None
             failures.append("cannot read {}/Mods/mods.txt: {}".format(RT, exc))
         if manifest:
+            samples = {m.lower() for m in UE4SS_SAMPLE_MODS}
+            for mod in enabled_mods(manifest):
+                if mod.lower() in samples:
+                    failures.append(
+                        "mods.txt switches on the UE4SS sample mod '{}'; a server "
+                        "runs only its own mods".format(mod)
+                    )
             for mod in enabled_mods(manifest):
                 if not mod.lower().startswith("solarpunk"):
                     continue
@@ -195,6 +222,13 @@ def verify(path):
                         "mods.txt enables '{}' but the zip has no "
                         "{}/Mods/{}/Scripts/main.lua".format(mod, RT, mod)
                     )
+
+        for sample in UE4SS_SAMPLE_MODS:
+            if "{}/mods/{}/enabled.txt".format(RT.lower(), sample.lower()) in sizes:
+                failures.append(
+                    "{}/Mods/{}/enabled.txt switches on a UE4SS sample "
+                    "mod".format(RT, sample)
+                )
 
     return failures
 

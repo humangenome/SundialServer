@@ -42,8 +42,9 @@ status file the supervisor polls:
 async event loop per enabled Lua mod, and double-loading the stack gives you two
 of every hook.
 
-UE4SS's own `CheatManagerEnablerMod`, `ConsoleCommandsMod`, `ConsoleEnablerMod`,
-and `Keybinds` stay enabled; `Keybinds` loads last by UE4SS convention.
+No UE4SS sample mod (`CheatManagerEnablerMod`, `ConsoleCommandsMod`, `ConsoleEnablerMod`,
+`Keybinds` and the rest) is switched on, and `scripts/verify-server-bundle.py` fails a
+bundle that switches one on.
 
 ## Status files
 
