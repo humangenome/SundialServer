@@ -7,7 +7,9 @@
 
 SundialServer runs a **Solarpunk dedicated server** on a Windows machine. It starts the game headless with the Sundial runtime, watches the game process, takes and restores world snapshots, answers Source A2S query, runs Source RCON and serves an admin HTTP API.
 
-Players join with the [Sundial app](https://github.com/HumanGenome/Sundial). A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin). The **release zip bundles it** as an `ue4ss-server\` folder, and you copy its contents into the game's `Binaries\Win64` directory once. See [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
+Players join a server by address with the [Sundial app](https://github.com/HumanGenome/Sundial). Solarpunk 1.3.0 moved the game's multiplayer to Epic Online Services, and joining by address has not been confirmed on 1.3.0.
+
+A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin). The **release zip bundles it** as an `ue4ss-server\` folder, and you copy its contents into the game's `Binaries\Win64` directory once. See [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
 
 ## Features
 
@@ -40,7 +42,7 @@ Release builds are self-contained; a separate .NET install is not required for n
 ## Installation
 
 ### Rent a server
-[SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) ships the complete Sundial server runtime already installed and handles ports, updates, and panel integration.
+[SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) runs SundialServer for you on Solarpunk 1.3.0. Its new servers use the game's own invite code (Multiplayer, Join session, Enter Code), so players do not need the Sundial app to join them.
 
 ### Self-host
 1. Download `SundialServer-v<version>.zip` from the [latest release](https://github.com/HumanGenome/SundialServer/releases/latest). It is self-contained: `SolarpunkServer\` (the supervisor + `appsettings.json`) plus the in-game runtime under `ue4ss-server\`.
@@ -51,9 +53,9 @@ Release builds are self-contained; a separate .NET install is not required for n
 6. Open/forward the ports listed below.
 7. Run `SolarpunkServer\SolarpunkServer.exe`.
 
-Players connect with the Sundial app to `<host>:<GameplayPort>`.
+Players connect with the Sundial app to `<host>:<GameplayPort>`. This address setup has not been confirmed on Solarpunk 1.3.0.
 
-Server 0.1.90 and later needs Sundial app 0.1.71 or later on every player's PC. Close the game and restart the app so it updates its client runtime before connecting.
+For joining by address, server 0.1.90 and later needs Sundial app 0.1.71 or later on every player's PC. Close the game and restart the app so it updates its client runtime before connecting.
 
 > **Note:** the release zip is complete. It bundles the in-game runtime (UE4SS, Sundial's server mods and the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat feed, roster or admin tools. A rented Survival Servers server includes the runtime and stages it for you.
 
