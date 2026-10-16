@@ -225,7 +225,25 @@ local function write_status(ready, passwordConfigured, reason)
     end
 end
 
+-- BEGIN auth_password_choice
+-- The password the name-channel gate enforces. On a "Transport": "eos" server
+-- players join through the game's own invite code and have no way to send the
+-- Sundial name-channel token, so a configured password would kick every one of
+-- them after the grace window. There the invite code is the gate and the
+-- password is not enforced. Returns the effective password and whether a
+-- configured password was set aside.
+local AUTHCFG = {}
+function AUTHCFG.effective_password(password, transport)
+    password = password or ""
+    if type(transport) == "string" and transport:lower() == "eos" then
+        return "", password ~= ""
+    end
+    return password, false
+end
+-- END auth_password_choice
+
 local CONFIGURED_PASSWORD = ""
+local OPEN_REASON = "no_password_configured"
 do
     local path = find_appsettings()
     APPSETTINGS_PATH = path
@@ -234,10 +252,18 @@ do
         local body = read_all(path)
         -- SolarpunkAuthPassword only; byte-exact, no trim (panel normalises
         -- at input time, launcher sends byte-exact).
-        CONFIGURED_PASSWORD = extract_json_string(body, "SolarpunkAuthPassword") or ""
-        if CONFIGURED_PASSWORD == "" then
+        local configured = extract_json_string(body, "SolarpunkAuthPassword") or ""
+        local transport = extract_json_string(body, "Transport") or "ip"
+        local set_aside
+        CONFIGURED_PASSWORD, set_aside = AUTHCFG.effective_password(configured, transport)
+        if set_aside then
+            OPEN_REASON = "eos_invite_code"
+            log("Transport is eos: players join with the game's invite code and cannot send the Sundial token, " ..
+                "so SolarpunkAuthPassword (length=" .. #configured .. ") is not enforced; the invite code is the gate")
+            write_status(true, false, OPEN_REASON)
+        elseif CONFIGURED_PASSWORD == "" then
             log("SolarpunkAuthPassword is empty - auth check disabled (server is open)")
-            write_status(true, false, "no_password_configured")
+            write_status(true, false, OPEN_REASON)
         else
             log("SolarpunkAuthPassword loaded (length=" .. #CONFIGURED_PASSWORD .. "); auth check active")
             write_status(false, true, "loading")
@@ -564,8 +590,8 @@ SP.every("auth-sweep", 1000, 500, function()
 end)
 
 log("auth gate active (1s game-thread sweep, name-channel)")
-write_status(true, true, "gate_active")
+write_status(true, CONFIGURED_PASSWORD ~= "", CONFIGURED_PASSWORD == "" and OPEN_REASON or "gate_active")
 
 SP.every("auth-status-heartbeat", 30000, 5000, function()
-    write_status(true, CONFIGURED_PASSWORD ~= "", CONFIGURED_PASSWORD == "" and "no_password_configured" or "gate_active")
+    write_status(true, CONFIGURED_PASSWORD ~= "", CONFIGURED_PASSWORD == "" and OPEN_REASON or "gate_active")
 end)

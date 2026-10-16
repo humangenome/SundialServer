@@ -120,7 +120,7 @@ public sealed class HeartbeatWatchdogService : BackgroundService
         //   2. Pipe connection exists but SolarpunkAuth status is not ready
         //      past LuaStatusBootstrapGrace since handshake. Use BOTH
         //      path-scoped KillGame AND PluginPid-based kill.
-        if (string.IsNullOrEmpty(_opts.SolarpunkAuthPassword)) return;
+        if (!_opts.PasswordGateEnforced) return;
 
         string statusPath;
         try

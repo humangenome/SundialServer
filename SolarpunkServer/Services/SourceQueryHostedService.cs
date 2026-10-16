@@ -68,7 +68,9 @@ public sealed class SourceQueryHostedService : IHostedService, IAsyncDisposable
         // SolarpunkAuth.lua, which dropped the legacy fallback (reading
         // ServerPassword would only matter for the native-enforcement
         // crash path we're pivoting away from).
-        PasswordRequired: !string.IsNullOrEmpty(_opts.SolarpunkAuthPassword),
+        // On an "eos" server the gate does not enforce the password (players join
+        // with the game's invite code), so it is not advertised either.
+        PasswordRequired: _opts.PasswordGateEnforced,
         VacSecured: false,
         Version: $"solarpunk-{SolarpunkVersionInfo.SolarpunkVersion}/sp-{SolarpunkVersionInfo.SpBuild}",
         GameplayPort: _opts.GameplayPort,

@@ -60,7 +60,9 @@ jobs:
           exit $status
 
       - name: Lua regression tests
-        run: lua5.4 tests/world-upload-choice.lua
+        run: |
+          lua5.4 tests/world-upload-choice.lua
+          lua5.4 tests/auth-eos-password.lua
 
       - name: The orchestrator is the only enabled mod
         run: |

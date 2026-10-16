@@ -64,6 +64,25 @@ public sealed class SolarpunkServerOptions
     /// </summary>
     public string SolarpunkAuthPassword { get; set; } = "";
 
+    /// <summary>
+    /// How players reach the game: "ip" (default) swaps in IpNetDriver so the
+    /// Sundial app joins by address; "eos" keeps the game's own Epic Online
+    /// Services networking, so players join with the game's invite code.
+    /// Read by the SolarpunkHost and SolarpunkAuth Lua modules from the same file.
+    /// </summary>
+    public string Transport { get; set; } = "ip";
+
+    /// <summary>
+    /// True when the SolarpunkAuth name-channel gate enforces
+    /// <see cref="SolarpunkAuthPassword"/>. On an "eos" server players cannot
+    /// send the name-channel token, so the gate does not enforce a password
+    /// there (the invite code is the gate): the watchdog must not fail-close
+    /// on it and Source query must not advertise one.
+    /// </summary>
+    public bool PasswordGateEnforced =>
+        !string.IsNullOrEmpty(SolarpunkAuthPassword)
+        && !string.Equals(Transport, "eos", StringComparison.OrdinalIgnoreCase);
+
     public string ServerName { get; set; } = "";
 
     public string GameInstallRoot { get; set; } = @"C:\Solarpunk\game";
