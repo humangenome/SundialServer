@@ -183,8 +183,8 @@ end
 --     controller mid-join-transition — the AV window UE4SS 5.7 is fragile in.
 --   * SP.kicked[addr]: marked by SolarpunkAuth; every mod skips a kicked
 --     (dying) controller entirely — never re-touch a PC after kick.
---   * SP.controllers(): one FindAllOf("BP_MainPlayerController_C") per
---     scheduler tick, shared by all tasks in that tick.
+--   * SP.controllers(): the player-controller list, shared by all tasks in a
+--     tick and KEPT between ticks (see "Kept objects" below).
 -- ---------------------------------------------------------------------------
 
 local SP = {}
@@ -202,12 +202,139 @@ function SP.settled(addr)
     return (not t) or (os.time() - t >= SETTLE_S)
 end
 
+-- ---------------------------------------------------------------------------
+-- Kept objects instead of whole-list searches (2026-10-16).
+--
+-- FindAllOf / FindFirstOf walk every object the engine has (tens of ms each on
+-- a busy host), on the game thread. The host runs a fixed 30 fps step, so a
+-- stalled frame is world time that never happens: one controller search plus
+-- one GameState search every 250 ms held Solarpunk worlds at 95-96.5% of real
+-- time with nobody on (the Grounded 2 / Bellwright bug class).
+--
+-- Found objects are kept while IsValid() (UE4SS checks the live object map and
+-- the unreachable flag, so a freed object reads false) and still of the class
+-- they had when found (an address can be reused; FindAllOf/FindFirstOf also
+-- return subclasses, so the object's own class is recorded, not the searched
+-- name). They are searched again:
+--   * after a map load (LoadMap / InitGameState post hooks bump map_gen), or
+--     when a kept object is gone (a travel's garbage collection),
+--   * for the controller list: when the GameState's PlayerArray length
+--     changes (a join or a leave) or a BeginLoadData transition is newer than
+--     the last search,
+--   * and as a backstop: the controller list every RESEARCH_S seconds, a kept
+--     single object (GameState, World, GameInstance, SaveManager) every
+--     KEPT_RESEARCH_S seconds.
+-- A class that is not there (the menu has no GameState) is retried every
+-- MISS_RETRY_TICKS ticks, not every tick.
+-- ---------------------------------------------------------------------------
+local RESEARCH_S = 30
+local KEPT_RESEARCH_S = 120
+local MISS_RETRY_TICKS = 8          -- 2 s
+local CTRL_CLASS = "BP_MainPlayerController_C"
+local GS_CLASS = "BP_SkyGameGameState_C"
+
+SP.scan = { walks = 0, ctrl = 0, kept = 0, why = {} }
+local function note_search(kind, why)
+    SP.scan.walks = SP.scan.walks + 1
+    SP.scan[kind] = SP.scan[kind] + 1
+    SP.scan.why[why] = (SP.scan.why[why] or 0) + 1
+end
+
+local map_gen = 0
+local function bump_map_gen() map_gen = map_gen + 1 end
+pcall(function() RegisterLoadMapPostHook(bump_map_gen) end)
+pcall(function() RegisterInitGameStatePostHook(bump_map_gen) end)
+function SP.map_gen() return map_gen end
+
+local function valid(o)
+    if o == nil then return false end
+    local ok, v = pcall(function() return o:IsValid() end)
+    return ok and v == true
+end
+local function class_of(o)
+    local ok, cls = pcall(function() return o:GetClass():GetFName():ToString() end)
+    if ok and type(cls) == "string" then return cls end
+    return nil
+end
+-- IsValid + still the class it had when it was found. Touches nothing else.
+local function alive(o, cls)
+    return cls ~= nil and valid(o) and class_of(o) == cls
+end
+
+-- The first object of a class (FindFirstOf semantics), kept between calls.
+local kept = {}
+function SP.kept(cname)
+    local e = kept[cname]
+    if not e then e = { gen = -1, at = 0, tick = -1000000 }; kept[cname] = e end
+    local now = os.time()
+    if e.gen == map_gen and now - e.at < KEPT_RESEARCH_S then
+        if e.obj ~= nil and alive(e.obj, e.cls) then return e.obj end
+        if e.obj == nil and SP.tick - e.tick < MISS_RETRY_TICKS then return nil end
+    end
+    local why = (e.gen ~= map_gen) and "map" or ((now - e.at >= KEPT_RESEARCH_S) and "age" or (e.obj == nil and "miss" or "gone"))
+    note_search("kept", why)
+    local o = nil
+    pcall(function() o = FindFirstOf(cname) end)
+    local cls = valid(o) and class_of(o) or nil
+    if cls == nil then o = nil end
+    e.obj, e.cls, e.gen, e.at, e.tick = o, cls, map_gen, now, SP.tick
+    return o
+end
+
+-- Players in the GameState's PlayerArray (nil while there is no GameState).
+function SP.player_count()
+    local gs = SP.kept(GS_CLASS)
+    if gs == nil then return nil end
+    local n = nil
+    pcall(function() n = gs.PlayerArray:GetArrayNum() end)
+    return n
+end
+
+local function newest_transition()
+    local m = 0
+    for _, t in pairs(SP.transition) do
+        if t > m then m = t end
+    end
+    return m
+end
+
+local ctrl = { list = nil, cls = nil, gen = -1, at = 0, tick = -1000000, players = nil, stamp = 0 }
+local function ctrl_search_reason(now)
+    if ctrl.list == nil or ctrl.gen ~= map_gen then return "map" end
+    if now - ctrl.at >= RESEARCH_S then return "age" end
+    if #ctrl.list == 0 then
+        return (SP.tick - ctrl.tick >= MISS_RETRY_TICKS) and "miss" or nil
+    end
+    for i, c in ipairs(ctrl.list) do
+        if not alive(c, ctrl.cls[i]) then return "gone" end
+    end
+    if SP.player_count() ~= ctrl.players then return "players" end
+    if newest_transition() > ctrl.stamp then return "transition" end
+    return nil
+end
+
 local ctrl_cache_tick, ctrl_cache = -1, nil
 function SP.controllers()
     if ctrl_cache_tick == SP.tick then return ctrl_cache end
     ctrl_cache_tick = SP.tick
-    ctrl_cache = nil
-    pcall(function() ctrl_cache = FindAllOf("BP_MainPlayerController_C") end)
+    local now = os.time()
+    local why = ctrl_search_reason(now)
+    if why then
+        note_search("ctrl", why)
+        local found = nil
+        pcall(function() found = FindAllOf(CTRL_CLASS) end)
+        local list, clss = {}, {}
+        if found then
+            for _, c in ipairs(found) do
+                local cls = valid(c) and class_of(c) or nil
+                if cls then list[#list + 1] = c; clss[#clss + 1] = cls end
+            end
+        end
+        ctrl.list, ctrl.cls, ctrl.gen, ctrl.at, ctrl.tick = list, clss, map_gen, now, SP.tick
+        ctrl.players = SP.player_count()
+        ctrl.stamp = newest_transition()
+    end
+    ctrl_cache = (#ctrl.list > 0) and ctrl.list or nil
     return ctrl_cache
 end
 
@@ -307,6 +434,19 @@ write_runtime_status(#failed == 0 and "all_modules_loaded" or "partial_load")
 
 SP.every("runtime-heartbeat", 30000, 1000, function()
     write_runtime_status(#failed == 0 and "all_modules_loaded" or "partial_load")
+end)
+
+-- Object searches made through SP.controllers / SP.kept, every 5 minutes.
+local scan_ticks_at = 0
+SP.every("runtime-scan-stats", 300000, 1500, function()
+    local why = {}
+    for k, v in pairs(SP.scan.why) do why[#why + 1] = k .. "=" .. v end
+    table.sort(why)
+    log("scan stats: ticks=" .. (SP.tick - scan_ticks_at) .. " searches=" .. SP.scan.walks ..
+        " controllers=" .. SP.scan.ctrl .. " kept=" .. SP.scan.kept ..
+        " why=" .. table.concat(why, ",") .. " map_gen=" .. map_gen)
+    scan_ticks_at = SP.tick
+    SP.scan = { walks = 0, ctrl = 0, kept = 0, why = {} }
 end)
 
 log("server module load complete: loaded=" .. table.concat(loaded, ",") ..

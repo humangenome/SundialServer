@@ -175,7 +175,8 @@ end
 local roster = {}
 
 local function get_world_name()
-    local ok, world = pcall(FindFirstOf, "World")
+    local ok, world
+    if SP.kept then ok, world = pcall(SP.kept, "World") else ok, world = pcall(FindFirstOf, "World") end
     if not ok or not world or not world:IsValid() then return "" end
     local ok2, n = pcall(function() return world:GetName() end)
     if ok2 and n and n ~= "" then return tostring(n) end

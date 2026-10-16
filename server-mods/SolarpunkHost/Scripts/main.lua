@@ -326,13 +326,23 @@ end
 -- stable; the class enumeration is pre-host only.
 local runtime_hosted = false
 local lvp_skip_logged = false
+-- The GameInstance and the SaveManager are kept between calls by the runtime
+-- (SP.kept: IsValid + class check, searched again after a map load or every
+-- 30 s) instead of a whole-list search on every sweep and save hook.
+-- (this file's `local SP` is declared further down, so read the shared table)
+local function find_kept(cname)
+    local sp = _G.SolarpunkSP
+    if sp and sp.kept then return sp.kept(cname) end
+    return FindFirstOf(cname)
+end
+
 local function enforce_world_slot_runtime(reason)
     local did = false
-    local gi = FindFirstOf("BP_SkyGameInstance_C")
+    local gi = find_kept("BP_SkyGameInstance_C")
     if gi and gi:IsValid() then
         did = enforce_world_slot_fields(gi, "GameInstance.runtime." .. tostring(reason or "")) or did
     end
-    local sm = FindFirstOf("BPC_SaveManager_C")
+    local sm = find_kept("BPC_SaveManager_C")
     if sm and sm:IsValid() then
         did = enforce_world_slot_fields(sm, "SaveManager.runtime." .. tostring(reason or "")) or did
     end
@@ -2094,7 +2104,7 @@ local saved_player_id_field_cache = nil
 local pending_key_swaps = {}
 local key_swap_log = {}
 local function saved_players_array()
-    local sm = FindFirstOf("BPC_SaveManager_C")
+    local sm = find_kept("BPC_SaveManager_C")
     if not validish(sm) then return nil end
     local save
     if not pcall(function() save = sm.CachedSave end) or not validish(save) then return nil end
@@ -2878,7 +2888,7 @@ local function separate_server_record()
         return
     end
     local first_id = SR.read_saved_player_id(arr[1], SR.saved_player_id_field(arr[1]) or "PlayerID_9_EE47D6D847B2CFF0719CA4A8EB2B5363")
-    local save = FindFirstOf("BPC_SaveManager_C").CachedSave
+    local save = find_kept("BPC_SaveManager_C").CachedSave
     local copy = { arr[1] }
     for i = 1, n do copy[#copy + 1] = arr[i] end
     save.SavedPlayers = copy

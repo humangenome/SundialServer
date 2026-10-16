@@ -458,7 +458,10 @@ local fixed_logged = {}    -- ["uid>want"] = true (log each rewrite once)
 
 local function fix_name_array()
     if not resolve_struct_fields() then return end
-    local gs = FindFirstOf("BP_SkyGameGameState_C")
+    -- kept between ticks by the runtime (a FindFirstOf here every 250 ms was
+    -- half of the searches that slowed the world clock)
+    local gs
+    if SP.kept then gs = SP.kept("BP_SkyGameGameState_C") else gs = FindFirstOf("BP_SkyGameGameState_C") end
     if not is_valid(gs) then return end
     local arr
     if not pcall(function() arr = gs.UniqueIDToPlayerNames end) or arr == nil then return end

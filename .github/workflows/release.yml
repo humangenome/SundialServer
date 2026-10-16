@@ -223,6 +223,16 @@ jobs:
       - name: Test
         run: dotnet test Solarpunk.Server.sln -c Release --no-build --nologo
 
+      # The host mods' own regressions, including the object-search budget: a
+      # release that searches the whole object list every tick again slows every
+      # hosted world's clock (fixed 30 fps step), so it must not publish.
+      - name: Lua regression tests
+        run: |
+          sudo apt-get update && sudo apt-get install -y lua5.4
+          lua5.4 tests/world-upload-choice.lua
+          lua5.4 tests/auth-eos-password.lua
+          lua5.4 tests/host-scan-budget.lua
+
       # The shipped plugin is a mingw-w64 build. That is not a preference: the
       # published v0.1.68 binary every host runs today is one, and this recipe
       # reproduces it at exactly its byte count. An MSVC build of the same
