@@ -7,7 +7,7 @@
 
 SundialServer runs a **Solarpunk dedicated server** on a Windows machine. It starts the game headless with the Sundial runtime, watches the game process, takes and restores world snapshots, answers Source A2S query, runs Source RCON and serves an admin HTTP API.
 
-Players join a server by address with the [Sundial app](https://github.com/HumanGenome/Sundial). Solarpunk 1.3.0 moved the game's multiplayer to Epic Online Services, and joining by address has not been confirmed on 1.3.0.
+Players join with the game's own invite code: in Solarpunk choose Multiplayer, Join session, Enter Code, and type the server's 5-letter code. The code changes each time the server starts. The [Sundial app](https://github.com/HumanGenome/Sundial) was for Solarpunk before 1.3.0 and cannot join a 1.3.0 server.
 
 A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin). The **release zip bundles it** as an `ue4ss-server\` folder, and you copy its contents into the game's `Binaries\Win64` directory once. See [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
 
@@ -53,9 +53,7 @@ Release builds are self-contained; a separate .NET install is not required for n
 6. Open/forward the ports listed below.
 7. Run `SolarpunkServer\SolarpunkServer.exe`.
 
-Players connect with the Sundial app to `<host>:<GameplayPort>`. This address setup has not been confirmed on Solarpunk 1.3.0.
-
-For joining by address, server 0.1.90 and later needs Sundial app 0.1.71 or later on every player's PC. Close the game and restart the app so it updates its client runtime before connecting.
+These steps were written for Solarpunk before 1.3.0, when players joined by address with the Sundial app, and have not been redone for 1.3.0 yet. A server set up from them today does not open its world: a 1.3.0 host needs the Epic transport and identity settings that the [0.1.93 release notes](https://github.com/HumanGenome/SundialServer/releases/tag/v0.1.93) describe.
 
 > **Note:** the release zip is complete. It bundles the in-game runtime (UE4SS, Sundial's server mods and the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat feed, roster or admin tools. A rented Survival Servers server includes the runtime and stages it for you.
 
