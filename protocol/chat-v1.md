@@ -1,8 +1,7 @@
 # Chat v1
 
 Solarpunk ships no native text chat, so SundialServer provides one: a
-server-side ring buffer, an MOTD, admin broadcast verbs over RCON and HTTP, and
-an ingest endpoint for in-game overlays.
+server-side ring buffer, an MOTD, and admin broadcast verbs over RCON and HTTP.
 
 ## Message shape
 
@@ -28,10 +27,10 @@ an ingest endpoint for in-game overlays.
 
 The buffer holds `Solarpunk.Chat.RingBufferSize` messages (default 200).
 
-## Reads — public
+## Reads
 
 ```
-GET /api/v1/chat/recent?since=<unix_ms>&limit=<n>
+GET /api/v1/chat/recent?since=<unix_ms>&limit=<n>      (HMAC required)
 ```
 
 `since` defaults to `0`, `limit` to `100`. Returns messages with `ts > since`,
@@ -47,42 +46,16 @@ oldest first. Poll with the highest `ts` you have seen to tail the feed.
 ```
 
 ```
-GET /api/v1/chat/motd
+GET /api/v1/chat/motd      (public)
 ```
 
 ```json
 { "instance": "solarpunk-local", "msg": "Welcome." }
 ```
 
-Both are public on purpose. The only thing that reaches the ring buffer is
-content already broadcast to every joined player, so a public read leaks
-nothing extra. The in-game overlay runs inside the player's game process and has
-no access to `RconPassword`, so requiring HMAC would mean shipping the admin
-secret to every client. If private channels are ever added, the public surface
-stays admin-broadcast-only and a separate authed endpoint carries them.
-
-## Player ingest — public, rate-limited
-
-```
-POST /api/v1/chat/player
-Content-Type: application/json
-
-{ "sender": "Alice", "msg": "hello" }
-```
-
-Used by in-game overlays. The server forces `channel` to `player` and `target`
-to `all`; a client cannot claim a system or admin channel. Per-IP rate limiting
-applies.
-
-| Status | Meaning |
-|---|---|
-| `200` | `{ "ok": true, "ts": <unix_ms> }` |
-| `400` | Missing `msg`, or invalid JSON. |
-| `413` | Body over 2 KB. |
-| `429` | Rate limited. |
-
-Request bodies are capped at 2 KB and the message body itself is truncated to
-512 bytes.
+The MOTD is public: every joining player is shown it anyway. The recent feed is
+signed like the other admin routes, because the ring buffer also carries join and
+leave lines with player names.
 
 ## Admin writes — HMAC required
 
@@ -117,5 +90,5 @@ Both use the standard HMAC scheme documented in
 
 Delivery to players is handled by the `SolarpunkChat` host mod, which fans
 inbound messages out through the game's stock `ClientMessage` path and also
-emits join and leave notices. The client-side overlay that renders a typed input
-box is a **preview** and is not enabled by default.
+emits join and leave notices. There is no player typing path: players cannot post
+chat through the server's HTTP API.

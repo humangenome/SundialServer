@@ -125,8 +125,7 @@ Public, no auth:
 - `GET /api/v1/health` — liveness and the online decision
 - `GET /api/v1/players` — connected players
 - `GET /api/v1/manifest` — mod manifest ([spec](../protocol/manifest-v1.md))
-- `GET /api/v1/chat/recent`, `GET /api/v1/chat/motd` — chat plane reads ([spec](../protocol/chat-v1.md))
-- `POST /api/v1/chat/player` — chat ingest from in-game overlays
+- `GET /api/v1/chat/motd` — the message of the day ([spec](../protocol/chat-v1.md))
 - `GET /map/` — the live map page ([spec](../protocol/map-v1.md))
 - `GET /api/v1/map/state` — map state, public only when `Map.Public` is `true`
 
@@ -137,6 +136,7 @@ HMAC-signed:
 - `GET /api/v1/snapshots/<id>/download`
 - `POST /api/v1/snapshots/<id>/restore`
 - `POST /api/v1/snapshots/import-restore`
+- `GET /api/v1/chat/recent`
 - `POST /api/v1/chat/say`, `POST /api/v1/chat/motd`
 - `GET /api/v1/map/state` when the map is private
 
@@ -147,12 +147,20 @@ key       = per-instance HMAC key derived from RconPassword
 canonical = METHOD + "\n" + path + "\n" + unix_ts + "\n" + sha256_hex(body)
 headers   = X-Solarpunk-Timestamp: <unix seconds>
             X-Solarpunk-Signature: <hex HMAC_SHA256(key, canonical)>
+            X-Solarpunk-Content-Sha256: <sha256_hex(body)>   (bodies over 64 KB)
 ```
 
 The server rejects timestamps older than 5 minutes and tracks accepted
-signatures so a captured request cannot be replayed inside that window. Upload
-bodies stream to a temp file with chunked SHA256 — there is no full-body buffer.
-`MaxUploadBytes` defaults to 2 GB and overflow returns 413.
+signatures so a captured request cannot be replayed inside that window.
+
+A request is authenticated before its body is stored. Bodies up to 64 KB (every
+JSON call) are read and checked as they are. A larger body, such as a snapshot
+upload, must send `X-Solarpunk-Content-Sha256`: the signature is checked from the
+headers first, then the body streams to a temp file and must hash to the declared
+value. Without that header a body over 64 KB gets `428`, and a body of unknown
+length (chunked, no header) gets `411`. `MaxUploadBytes` defaults to 2 GB and
+overflow returns 413. One upload runs at a time (a second one gets `503`), and
+public reads such as `/api/v1/health` have their own request slots.
 
 Every response carries `X-Solarpunk-Instance`.
 

@@ -32,12 +32,21 @@ namespace SolarpunkServer.Services;
 /// and sends headers:
 ///   X-Solarpunk-Timestamp: &lt;unix seconds&gt;
 ///   X-Solarpunk-Signature: &lt;hex&gt;
-/// Server rejects timestamps older than 5 minutes (replay window).
+///   X-Solarpunk-Content-Sha256: &lt;body_sha256_hex&gt; (required for bodies over 64 KB)
+/// Server rejects timestamps older than 5 minutes (replay window). Nothing over
+/// 64 KB of a request is stored before it is authenticated (see AdminRequestGate).
 /// </summary>
 public sealed class SolarpunkHttpService : BackgroundService
 {
     private const int ReplayWindowSeconds = 300;
-    private const int MaxConcurrentRequests = 8;
+    // Public reads and signed calls are counted separately, so requests aimed at the
+    // signed routes can never starve the health check the panel polls. Large uploads
+    // are authenticated before they start and then run one at a time.
+    private const int MaxPublicRequests = 8;
+    private const int MaxSignedRequests = 8;
+    private const int MaxConcurrentUploads = 1;
+    // Temp upload files older than this are leftovers from a crash and are removed at start.
+    private static readonly TimeSpan StaleUploadAge = TimeSpan.FromHours(6);
 
     private readonly ILogger<SolarpunkHttpService> _log;
     private readonly SolarpunkServerOptions _opts;
@@ -47,7 +56,9 @@ public sealed class SolarpunkHttpService : BackgroundService
     private readonly InstanceIdentityProvider _identity;
     private readonly ChatService _chat;
     private readonly byte[] _authKey;
-    private readonly SemaphoreSlim _requestLimiter = new(MaxConcurrentRequests, MaxConcurrentRequests);
+    private readonly SemaphoreSlim _publicLimiter = new(MaxPublicRequests, MaxPublicRequests);
+    private readonly SemaphoreSlim _signedLimiter = new(MaxSignedRequests, MaxSignedRequests);
+    private readonly SemaphoreSlim _uploadLimiter = new(MaxConcurrentUploads, MaxConcurrentUploads);
     // Sliding window of signatures we've already accepted, so a captured
     // valid request inside the 5-minute replay window can't be re-sent to
     // double-trigger a restore or pile up snapshots.
@@ -151,6 +162,8 @@ public sealed class SolarpunkHttpService : BackgroundService
         }
 
         _log.LogInformation("HTTP API listening on {Prefixes}", string.Join(", ", _listener.Prefixes));
+        ApplyListenerTimeouts(_listener);
+        RemoveStaleUploads();
 
         // Outer loop: if the listener crashes for any reason other than
         // shutdown, log it and restart after a short backoff so a transient
@@ -172,10 +185,15 @@ public sealed class SolarpunkHttpService : BackgroundService
                     catch (ObjectDisposedException) { break; }
                     catch (OperationCanceledException) { break; }
 
-                    // Bounded concurrency: refuse new requests if too many
+                    // Bounded concurrency, per class: refuse new requests if too many
                     // are already in flight rather than spawning unbounded
-                    // Task.Run instances.
-                    if (!await _requestLimiter.WaitAsync(0).ConfigureAwait(false))
+                    // Task.Run instances. Public reads have their own slots.
+                    var routeClass = AdminRequestGate.Classify(
+                        ctx.Request.HttpMethod.ToUpperInvariant(),
+                        ctx.Request.Url?.AbsolutePath ?? "",
+                        _opts.Map.Enabled && _opts.Map.Public);
+                    var limiter = routeClass == RouteClass.Public ? _publicLimiter : _signedLimiter;
+                    if (!await limiter.WaitAsync(0).ConfigureAwait(false))
                     {
                         try
                         {
@@ -190,7 +208,7 @@ public sealed class SolarpunkHttpService : BackgroundService
                     _ = Task.Run(async () =>
                     {
                         try { await HandleRequestAsync(ctx, stoppingToken).ConfigureAwait(false); }
-                        finally { _requestLimiter.Release(); }
+                        finally { limiter.Release(); }
                     }, stoppingToken);
                 }
             }
@@ -379,33 +397,9 @@ public sealed class SolarpunkHttpService : BackgroundService
 
             // ----- Chat plane reads (protocol/chat-v1.md) -----
             //
-            // Public on purpose. The only thing that ever lands in the ring
-            // buffer is admin broadcast (RCON say/announce + HTTP /chat/say +
-            // scheduled warnings + MOTD). Everything in the stream is already
-            // shouted at every joined player, so a public read endpoint leaks
-            // nothing extra.
-            //
-            // The in-game SolarpunkHud overlay runs inside the player's game
-            // process and has no access to RconPassword, so HMAC would
-            // require shipping the secret to every client. If the game ever
-            // grows native chat or DMs, the public surface stays
-            // admin-broadcast-only and a separate authed /chat/recent/full
-            // can carry private channels.
-            if (method == "GET" && path == "/api/v1/chat/recent")
-            {
-                var sinceMs = ParseLongQuery(req.Url, "since", 0);
-                var limit = (int)ParseLongQuery(req.Url, "limit", 100);
-                var msgs = _chat.GetRecent(sinceMs, limit);
-                await WriteJsonAsync(res, 200, new
-                {
-                    version = 1,
-                    instance = _identity.InstanceId,
-                    now_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    messages = msgs,
-                });
-                return;
-            }
-
+            // The MOTD is public: every joining player is shown it anyway.
+            // The recent-messages feed is signed (below the auth gate): the
+            // ring buffer also carries join and leave lines with player names.
             if (method == "GET" && path == "/api/v1/chat/motd")
             {
                 await WriteJsonAsync(res, 200, new
@@ -413,56 +407,6 @@ public sealed class SolarpunkHttpService : BackgroundService
                     instance = _identity.InstanceId,
                     msg = _chat.GetMotd(),
                 });
-                return;
-            }
-
-            // ----- Public chat ingest from player overlays -----
-            //
-            // The game has no native chat. Players type into the SolarpunkHud
-            // overlay's ImGui InputText, the launcher relays the message here.
-            // Channel is forced to "player" and target to "all" by
-            // ChatService.BroadcastFromPlayer. Per-IP rate limit handled there.
-            //
-            // Body is bounded at 2 KB — bigger than any sensible chat message
-            // (the body itself caps at 512 bytes via NormalizeBody) but small
-            // enough that we can read it inline without the streaming buffer
-            // the authed routes use.
-            if (method == "POST" && path == "/api/v1/chat/player")
-            {
-                string rawBody;
-                try { rawBody = await ReadShortBodyAsync(req, maxBytes: 2048, ct).ConfigureAwait(false); }
-                catch (BodyTooLargeException)
-                {
-                    await WriteJsonAsync(res, 413, new { error = "payload too large" });
-                    return;
-                }
-                ChatPlayerRequest? plReq;
-                try
-                {
-                    plReq = JsonSerializer.Deserialize<ChatPlayerRequest>(rawBody, new JsonSerializerOptions
-                    {
-                        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-                        PropertyNameCaseInsensitive = true,
-                    });
-                }
-                catch (JsonException)
-                {
-                    await WriteJsonAsync(res, 400, new { error = "invalid json" });
-                    return;
-                }
-                if (plReq is null || string.IsNullOrWhiteSpace(plReq.Msg))
-                {
-                    await WriteJsonAsync(res, 400, new { error = "msg required" });
-                    return;
-                }
-                var clientIp = req.RemoteEndPoint?.Address?.ToString() ?? "";
-                var entry = _chat.BroadcastFromPlayer(clientIp, plReq.Sender ?? "Player", plReq.Msg);
-                if (entry is null)
-                {
-                    await WriteJsonAsync(res, 429, new { error = "rate limited" });
-                    return;
-                }
-                await WriteJsonAsync(res, 200, new { ok = true, ts = entry.Ts });
                 return;
             }
 
@@ -481,9 +425,37 @@ public sealed class SolarpunkHttpService : BackgroundService
                 await WriteJsonAsync(res, 413, new { error = "payload too large" });
                 return;
             }
+            catch (GateRefusedException refused)
+            {
+                await WriteJsonAsync(res, refused.Status, new { error = refused.Message });
+                return;
+            }
+            catch (Exception ex) when (ex is HttpListenerException or IOException)
+            {
+                // The client went away while sending its body. Nothing to answer, and
+                // not an error worth a log line per attempt.
+                _log.LogDebug(ex, "HTTP {Method} {Path}: client closed during the body", method, path);
+                return;
+            }
             if (body is null)
             {
                 await WriteJsonAsync(res, 401, new { error = "unauthorized" });
+                return;
+            }
+
+            if (method == "GET" && path == "/api/v1/chat/recent")
+            {
+                body.Dispose();
+                var sinceMs = ParseLongQuery(req.Url, "since", 0);
+                var limit = (int)ParseLongQuery(req.Url, "limit", 100);
+                var msgs = _chat.GetRecent(sinceMs, limit);
+                await WriteJsonAsync(res, 200, new
+                {
+                    version = 1,
+                    instance = _identity.InstanceId,
+                    now_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    messages = msgs,
+                });
                 return;
             }
 
@@ -623,7 +595,7 @@ public sealed class SolarpunkHttpService : BackgroundService
             }
 
             // ----- Chat plane writes (protocol/chat-v1.md) -----
-            // GET /chat/recent + GET /chat/motd live above the auth gate.
+            // GET /chat/motd lives above the auth gate; GET /chat/recent is signed (above).
             if (method == "POST" && path == "/api/v1/chat/say")
             {
                 var sayReq = await ParseJsonBodyAsync<ChatSayRequest>(body, ct).ConfigureAwait(false);
@@ -674,93 +646,140 @@ public sealed class SolarpunkHttpService : BackgroundService
     }
 
     /// <summary>
-    /// Streams the request body (if any) to a temp file while computing
-    /// SHA256 inline. On signature mismatch / replay reuse / cap overflow,
-    /// the temp file is deleted and we return null. The body never lands
-    /// in a MemoryStream — uploads up to <see cref="SolarpunkServerOptions.MaxUploadBytes"/>
-    /// cost one temp-file's worth of disk and an HMAC state.
+    /// Authenticates a request before storing its body. Small bodies (the JSON admin
+    /// calls, at most <see cref="AdminRequestGate.SmallBodyMaxBytes"/>) are read into
+    /// memory and their signature checked over their hash; larger ones must declare
+    /// their hash in X-Solarpunk-Content-Sha256, whose signature is checked from the
+    /// headers before the first body byte is read, then stream to a temp file and must
+    /// match the declared hash. Returns null when the request is not authenticated; the
+    /// temp file of a refused or failed upload is always deleted.
     /// </summary>
     private async Task<BufferedBody?> ValidateAuthAndBufferAsync(HttpListenerRequest req, CancellationToken ct)
     {
-        var tsHeader = req.Headers["X-Solarpunk-Timestamp"];
-        var sigHeader = req.Headers["X-Solarpunk-Signature"];
-        if (string.IsNullOrWhiteSpace(tsHeader) || string.IsNullOrWhiteSpace(sigHeader))
-            return null;
-        if (!long.TryParse(tsHeader, out var ts)) return null;
-
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        if (!_replayGuard.IsTimestampInWindow(ts, now)) return null;
-
-        if (req.ContentLength64 > _opts.MaxUploadBytes)
-            throw new BodyTooLargeException();
-
         var path = req.Url?.AbsolutePath ?? "";
         var method = req.HttpMethod.ToUpperInvariant();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var sigHeader = req.Headers[AdminRequestGate.SignatureHeader];
 
-        var buffered = await BufferBodyToDiskAsync(req, _opts.MaxUploadBytes, ct).ConfigureAwait(false);
-        // buffered.Sha256Hex is already lower-hex over the streamed bytes.
+        var decision = AdminRequestGate.Precheck(
+            _authKey, _replayGuard, method, path,
+            req.Headers[AdminRequestGate.TimestampHeader],
+            sigHeader,
+            req.Headers[AdminRequestGate.ContentShaHeader],
+            req.ContentLength64,
+            req.HasEntityBody,
+            _opts.MaxUploadBytes,
+            now);
 
-        var canonical = HmacRequestAuth.CanonicalString(method, path, ts, buffered.Sha256Hex);
-        var expected = HmacRequestAuth.Sign(_authKey, canonical);
-
-        if (!HmacRequestAuth.SignatureMatches(expected, sigHeader))
+        switch (decision.Verdict)
         {
-            buffered.Dispose();
-            return null;
+            case GateVerdict.Unauthorized:
+                return null;
+            case GateVerdict.TooLarge:
+                throw new BodyTooLargeException();
+            case GateVerdict.LengthRequired:
+                throw new GateRefusedException(411, "content length required");
+            case GateVerdict.ContentShaRequired:
+                throw new GateRefusedException(428, $"{AdminRequestGate.ContentShaHeader} is required for bodies over {AdminRequestGate.SmallBodyMaxBytes / 1024} KB");
+            case GateVerdict.ReadThenVerify:
+            {
+                var bytes = req.HasEntityBody
+                    ? await AdminRequestGate.ReadSmallAsync(req.InputStream, req.ContentLength64, AdminRequestGate.SmallBodyMaxBytes, ct).ConfigureAwait(false)
+                    : Array.Empty<byte>();
+                var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+                if (!AdminRequestGate.VerifyBuffered(_authKey, _replayGuard, method, path, decision.Timestamp, sigHeader, sha, now))
+                    return null;
+                // Authenticated: only now does any of the request reach the disk.
+                var tempPath = NewUploadTempPath();
+                try
+                {
+                    await File.WriteAllBytesAsync(tempPath, bytes, ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    try { File.Delete(tempPath); } catch { }
+                    throw;
+                }
+                return new BufferedBody(tempPath, sha, bytes.LongLength);
+            }
+            case GateVerdict.StreamPreverified:
+            {
+                if (!await _uploadLimiter.WaitAsync(0, ct).ConfigureAwait(false))
+                    throw new GateRefusedException(503, "another upload is in progress, retry shortly");
+                try
+                {
+                    var tempPath = NewUploadTempPath();
+                    var (sha, total) = await AdminRequestGate.CopyToFileAsync(
+                        req.InputStream, tempPath, req.ContentLength64, _opts.MaxUploadBytes, ct).ConfigureAwait(false);
+                    var buffered = new BufferedBody(tempPath, sha, total);
+                    if (!string.Equals(sha, decision.ContentSha256, StringComparison.Ordinal))
+                    {
+                        buffered.Dispose();
+                        return null;
+                    }
+                    return buffered;
+                }
+                finally
+                {
+                    _uploadLimiter.Release();
+                }
+            }
+            default:
+                return null;
         }
+    }
 
-        if (!_replayGuard.TryAccept(sigHeader, ts, now))
-        {
-            buffered.Dispose();
-            return null;
-        }
+    private static string UploadTempDir => Path.Combine(Path.GetTempPath(), "solarpunk-uploads");
 
-        return buffered;
+    private static string NewUploadTempPath()
+    {
+        Directory.CreateDirectory(UploadTempDir);
+        return Path.Combine(UploadTempDir, $"upload-{Guid.NewGuid():N}.bin");
     }
 
     /// <summary>
-    /// Stream the request body into a temp file while hashing in 64 KB
-    /// chunks. Never allocates a buffer the size of the body. Throws
-    /// <see cref="BodyTooLargeException"/> if the stream exceeds the cap
-    /// mid-read.
+    /// Removes temp upload files left behind by a crash. Only files older than
+    /// <see cref="StaleUploadAge"/>, because several servers on one machine share the
+    /// same temp folder and another one may be receiving an upload right now.
     /// </summary>
-    private static async Task<BufferedBody> BufferBodyToDiskAsync(HttpListenerRequest req, long maxBytes, CancellationToken ct)
+    private void RemoveStaleUploads()
     {
-        var tempDir = Path.Combine(Path.GetTempPath(), "solarpunk-uploads");
-        Directory.CreateDirectory(tempDir);
-        var tempPath = Path.Combine(tempDir, $"upload-{Guid.NewGuid():N}.bin");
-
-        long total = 0;
-        string sha;
         try
         {
-            await using var fs = new FileStream(
-                tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true);
-            using var hasher = SHA256.Create();
-            var buf = new byte[64 * 1024];
-            if (req.ContentLength64 != 0)
+            if (!Directory.Exists(UploadTempDir)) return;
+            var cutoff = DateTime.UtcNow - StaleUploadAge;
+            foreach (var file in Directory.EnumerateFiles(UploadTempDir, "upload-*.bin"))
             {
-                while (true)
+                try
                 {
-                    int n = await req.InputStream.ReadAsync(buf, ct).ConfigureAwait(false);
-                    if (n <= 0) break;
-                    total += n;
-                    if (total > maxBytes)
-                        throw new BodyTooLargeException();
-                    hasher.TransformBlock(buf, 0, n, null, 0);
-                    await fs.WriteAsync(buf.AsMemory(0, n), ct).ConfigureAwait(false);
+                    if (File.GetLastWriteTimeUtc(file) < cutoff) File.Delete(file);
                 }
+                catch { }
             }
-            hasher.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-            sha = Convert.ToHexString(hasher.Hash!).ToLowerInvariant();
         }
-        catch
+        catch (Exception ex)
         {
-            try { File.Delete(tempPath); } catch { }
-            throw;
+            _log.LogDebug(ex, "stale upload cleanup skipped");
         }
+    }
 
-        return new BufferedBody(tempPath, sha, total);
+    /// <summary>
+    /// http.sys timeouts (Windows only): a client gets 15 s to send its headers and may
+    /// go 30 s without sending body bytes, so slow connections cannot hold request slots.
+    /// </summary>
+    private void ApplyListenerTimeouts(HttpListener listener)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            listener.TimeoutManager.HeaderWait = TimeSpan.FromSeconds(15);
+            listener.TimeoutManager.EntityBody = TimeSpan.FromSeconds(30);
+            listener.TimeoutManager.DrainEntityBody = TimeSpan.FromSeconds(10);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "HttpListener timeouts not applied");
+        }
     }
 
     /// <summary>
@@ -794,7 +813,11 @@ public sealed class SolarpunkHttpService : BackgroundService
         }
     }
 
-    private sealed class BodyTooLargeException : Exception { }
+    private sealed class GateRefusedException : Exception
+    {
+        public GateRefusedException(int status, string message) : base(message) { Status = status; }
+        public int Status { get; }
+    }
 
     /// <summary>
     /// Best-effort one-shot of
@@ -1011,31 +1034,6 @@ public sealed class SolarpunkHttpService : BackgroundService
     private sealed class MotdRequest
     {
         public string? Msg { get; set; }
-    }
-
-    private sealed class ChatPlayerRequest
-    {
-        public string Msg { get; set; } = "";
-        public string? Sender { get; set; }
-    }
-
-    private static async Task<string> ReadShortBodyAsync(HttpListenerRequest req, int maxBytes, CancellationToken ct)
-    {
-        if (!req.HasEntityBody) return "";
-        if (req.ContentLength64 > maxBytes) throw new BodyTooLargeException();
-        var buffer = new byte[Math.Min(maxBytes, 4096)];
-        using var ms = new MemoryStream();
-        int total = 0;
-        var stream = req.InputStream;
-        while (true)
-        {
-            var read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
-            if (read <= 0) break;
-            total += read;
-            if (total > maxBytes) throw new BodyTooLargeException();
-            ms.Write(buffer, 0, read);
-        }
-        return req.ContentEncoding.GetString(ms.ToArray());
     }
 
     private static object SerializeEntry(ModEntry e) => new

@@ -12,7 +12,7 @@
 -- (In-game *typing* would need a safe UMG input — deferred; Lantern ships none.)
 --
 --   1. Drains SolarpunkServer's chat-inbound.json (written by ChatService on
---      every RCON `say`, HTTP /api/v1/chat/say and /chat/player post) every
+--      every RCON `say` and signed HTTP /api/v1/chat/say post) every
 --      second and fans each message out to all connected PlayerControllers
 --      via the ClientMessage UFUNCTION — the game renders it natively.
 --   2. Sends the MOTD (SolarpunkServer\motd.txt, fresh-read per join) to each
