@@ -1,62 +1,83 @@
 # Sundial runtime
 
-How a Sundial host actually boots, what each layer is responsible for, and what
-to look at when a stage fails. Read [ADMIN.md](ADMIN.md) first for the settings
-and ports.
+How a Sundial host boots, what each layer does, and what to look at when a stage
+fails. Read [ADMIN.md](ADMIN.md) first for the settings and ports. Self-hosting on the
+current Solarpunk version is not supported by the public package.
 
 Solarpunk (Steam app `1805110`, Unreal Engine 5.7) ships no dedicated server.
-Sundial runs the retail game headless as a listen host, swaps its transport to
-plain UE `IpNetDriver`, and wraps it in a supervisor that adds the pieces a
-dedicated server is expected to have.
+Sundial runs the retail game headless as a listen host on the game's own Epic
+Online Services networking (Solarpunk 1.3.0 and later), so players join with the
+game's invite code and install nothing. A supervisor adds the pieces a dedicated
+server is expected to have: Source query, RCON, an admin HTTP API.
 
 ## Boot chain
 
 ```
-SolarpunkServer.exe
-  └─ launches <GameInstallRoot>\Solarpunk\Binaries\Win64\SolarpunkSteam-Win64-Shipping.exe
-       └─ Windows loads dwmapi.dll (UE4SS proxy)
-            └─ UE4SS.dll
-                 └─ mods.txt → SolarpunkServerRuntime
-                      ├─ SolarpunkModKit    _G.Solarpunk API surface
-                      ├─ SolarpunkHost      transport swap → world → HostGame → save keying
-                      ├─ SolarpunkAuth      join password gate
-                      ├─ SolarpunkRoster    roster.json
-                      └─ SolarpunkChat      chat fan-out + MOTD
-                 └─ SolarpunkPlugin.dll → named-pipe IPC back to SolarpunkServer.exe
+the host's launcher → SolarpunkServer.exe launch
+  └─ starts <GameInstallRoot>\Solarpunk\Binaries\Win64\SolarpunkSteam-Win64-Shipping.exe suspended,
+     with two DLLs queued to load before the game's own code:
+       ├─ SolarpunkEosIdentity.dll   this server's own Epic device identity
+       └─ ue4ss\UE4SS.dll
+            └─ Mods\mods.txt → SolarpunkServerRuntime
+                 ├─ SolarpunkModKit        _G.Solarpunk API surface
+                 ├─ SolarpunkHost          world → HostGame → save handling
+                 ├─ SolarpunkAuth          join password gate (ip path only)
+                 ├─ SolarpunkRoster        roster.json
+                 ├─ SolarpunkChat          chat fan-out + MOTD
+                 └─ SolarpunkNoPhantomHost hides the host's own player
 ```
 
-The supervisor also probes for `Binaries\Win64\Solarpunk-Win64-Shipping.exe` and
-the non-nested `Binaries\Win64\` layout, in that order, so a build rename does
-not break the launch.
+The game signs in to Epic about 3 seconds after it starts, before UE4SS mods could
+load, which is why both DLLs are queued at process creation. `SolarpunkServer.exe`
+then runs alongside the game as its supervisor (query, RCON, HTTP).
 
 ## Layer responsibilities
 
-**SolarpunkServer.exe (.NET 8 supervisor).** Owns the game process lifecycle,
-Source A2S query, Source RCON, the HMAC-signed admin HTTP API, the chat ring
-buffer, save snapshots and atomic restore, and the fail-closed auth watchdog.
-It is self-contained — no separate .NET install required.
+**SolarpunkServer.exe (.NET 8 supervisor).** Runs beside the game: Source A2S query, Source RCON,
+the HMAC-signed admin HTTP API, the chat ring buffer and save snapshots, and the
+`launch` verb above. It is self-contained: no separate .NET install.
 
-**UE4SS.** Loaded through the `dwmapi.dll` proxy. `UE4SS-settings.ini` sets
-`EngineVersionOverride` to 5.7 and disables the UObject array cache;
-`UE4SS_Signatures\` carries five PDB-derived AOB patterns (`FName_Constructor`,
-`GNatives`, `GUObjectArray`, `GUObjectHashTables`, `StaticConstructObject`).
-UE4SS's built-in scanner is wrong on 5.7 — these overrides are required, not
-optional tuning.
+**SolarpunkEosIdentity.dll.** Points the Epic SDK's credential store at one file
+per server (`<GameUserDir>\ss_eos_identity.cred`, or the path in
+`SP_EOS_IDENTITY_FILE`). Without it every server on a machine signs in as the same
+Epic device and shares one peer-to-peer address.
 
-**SolarpunkServerRuntime.** One UE4SS mod, one async event loop, five modules
-loaded by `dofile` in a fixed order. Publishes `.solarpunk-runtime-status`.
+**UE4SS.** `UE4SS-settings.ini` sets `EngineVersionOverride` to 5.7 and disables
+the UObject array cache; `UE4SS_Signatures\` carries five PDB-derived AOB patterns
+(`FName_Constructor`, `GNatives`, `GUObjectArray`, `GUObjectHashTables`,
+`StaticConstructObject`). UE4SS's built-in scanner is wrong on 5.7, so these are
+required.
 
-**SolarpunkPlugin.dll.** Native identity hook plus the named-pipe client that
-heartbeats to the supervisor and carries the player table.
+**SolarpunkServerRuntime.** One UE4SS mod and one scheduler on the game thread;
+it loads the other modules by `dofile` in a fixed order and publishes
+`.solarpunk-runtime-status`.
+
+**SolarpunkPlugin.dll.** The old direct-IP identity plugin. Never load it on
+Solarpunk 1.3.0: the host crashes on the first join.
+
+## Hosting and joining
+
+`SolarpunkHost` calls the game's own `HostGame()`. The game then signs in to Epic,
+passes its privilege check, creates the session, opens `/Game/Maps/MainLevel` and
+shows an invite code: the
+game log line `Setting invite code UI widget to "ABCDE"`. The code is new at every
+start. Players choose Multiplayer, Join session, Enter Code; the game's
+`RedpointEOSNetDriver` carries the connection over Epic's peer-to-peer network, so
+the game port is not used for joining.
 
 ## World persistence
 
 `BP_SkyGameInstance_C` exposes an FString property `WorldSaveName`.
-`SolarpunkHost` sets it **before** calling `HostGame()`, so the game's save
-system either loads
-`%LOCALAPPDATA%\Solarpunk\Saved\SaveGames\<WorldSaveName>.sav` or creates a
-fresh world under that name. The result is a stable named world that survives
-restarts.
+`SolarpunkHost` sets it **before** calling `HostGame()`, so the game's save system
+loads `<GameUserDir>\Saved\SaveGames\<WorldName>.sav` or creates a fresh world
+under that name.
+
+The game autosaves every 150 s of world time, to a slot file it names itself. The
+host copies the newest slot into `<WorldName>.sav` every 15 seconds and keeps a
+ledger of every save it wrote (`sundial-world-ledger.txt`). At the next start a
+`.sav` whose content is not in the ledger is treated as an upload and becomes the
+world (the previous world is kept in `_sundial_orphaned_saves\`), whatever its file
+time says.
 
 Two `appsettings.json` keys drive it:
 
@@ -65,8 +86,8 @@ Two `appsettings.json` keys drive it:
 | `WorldName` | `World1` | the world save slot |
 | `SaveIntervalSeconds` | `300` | how often the host re-pins the world slot; the game saves itself every 150 s of world time |
 
-Per-instance isolation comes from launching each instance with its own
-`LOCALAPPDATA`, which is what keeps two servers on one box from sharing a world.
+Each instance needs its own `GameUserDir`; that is what keeps two servers on one
+box from sharing a world.
 
 ### Saving before a stop
 
@@ -88,89 +109,46 @@ an autosave once crashed the game's save code. If the game saved moments ago,
 write `<token> mirror` instead, which copies that save into the world file
 without saving again.
 
-## Player identity and save shards
+## Players and characters
 
-The client is the source of the save key, provided up front on the travel URL.
-Rewriting the parameter from a Blueprint hook does not reach the BP VM, and
-reissuing the load late resets inventory ownership mid-session, so the key has
-to arrive with the join.
+Solarpunk keys each saved player by the player's own account id: an Epic id for
+an Epic player, the Steam id for a Steam player. A character follows the account,
+on any computer, across rejoins and restarts. A different account starts a new
+character.
 
-```
-synthetic id = "765611900" + (crc32(lowercase(character_name)) mod 1e9)
-```
-
-The Sundial app writes the same value into
-`%APPDATA%\Solarpunk\client-identity.txt` and appends `?Name=<character>` to the
-travel URL. Each character name therefore maps to one stable save shard, and a
-player with three characters keeps three separate sets of progress on the same
-world. An invalid or unrecognised remote load key fails closed rather than
-falling back to a shared shard.
+The server's own hidden player always takes the first saved record. In a world
+uploaded from single player that record is the owner's character, so set
+`"SeparateServerRecord": "on"`: the host then gives the server a record of its
+own once per world, and the owner keeps their character.
 
 ## Join authentication
 
-The engine's `K2_PostLogin` does **not** fire for remote `IpNetDriver` clients on
-this build — only for the listen host's local player. Remote joins run through
-the game's own login path, so the gate hooks that instead.
+On an `eos` server the invite code is the way in. `SolarpunkAuthPassword` is not
+enforced there: invite-code players cannot send it. The password gate (a token
+in the player name on the old direct-IP path) applies to `"Transport": "ip"` only.
 
-The client's `?Password=` option is also unreadable from Lua on this build:
-FString *properties* on the connection reflect as null UObjects, and no UFunction
-returns the per-connection options. The one inbound channel the client controls
-that Lua can read is the player **name**, via `GetPlayerName`.
-
-So a passworded server is joined as:
-
-```
-open <ip>:<port>?Name=<character>__SPPW__<password>
-```
-
-`SolarpunkAuth` splits on the `__SPPW__` delimiter and compares the token to
-`SolarpunkAuthPassword`; a mismatch or a missing token is a kick. Everything
-downstream — save keying, roster, chat — strips the delimiter first, so the
-password never reaches a save key or a published player name. The listen host
-itself has no `NetConnection` and is positively detected and exempt.
-
-An open server sends no token at all.
-
-## Fail-closed auth watchdog
-
-`HeartbeatWatchdogService` exists so a passworded server can never end up running
-open because the mod stack silently failed to load. If `SolarpunkAuthPassword` is
-set but `.solarpunk-auth-status` is not publishing a fresh `ready=1` past the
-grace window, the supervisor stops the game rather than leaving it reachable.
-
-`SolarpunkServerRuntime` pre-invalidates that status file at boot, so a stale
-`ready=1` written by a previous process can never satisfy the watchdog.
-
-If your server keeps stopping shortly after start and the log says FAIL-CLOSED,
-the gate is not loading — that is a UE4SS or mod-stack problem, not a password
-problem.
-
-## Transport
-
-The host swaps to plain UE `IpNetDriver`. On the client side the Sundial app
-writes an `Engine.ini` before launch; the load-bearing line is
-`[OnlineSubsystemSteam] bEnabled=false`, which deregisters SteamSockets so
-`IpNetDriver` binds a real UDP socket. Without it the client never reaches the
-host no matter what the address says. See
-[installer-v1](../protocol/installer-v1.md).
+`HeartbeatWatchdogService` exists so a passworded `ip` server can never end up
+running open because the mod stack failed to load: if `.solarpunk-auth-status` is
+not a fresh `ready=1` past the grace window, the supervisor stops the game. It does
+nothing on an `eos` server.
 
 ## Roster, query, and the map
 
 `SolarpunkRoster` scans `GameState` and writes `roster.json` (players plus live
-X/Y/Z) every 5 seconds and on login/logout. That one file feeds three surfaces:
-the A2S player list, `GET /api/v1/players`, and `GET /api/v1/map/state`. Map
-state is marked stale after `Map.StaleAfterMs` (default 10s).
+X/Y/Z) every 5 seconds and on login and logout. That one file feeds the A2S player
+list, `GET /api/v1/players` and `GET /api/v1/map/state`. Map state is marked
+stale after `Map.StaleAfterMs` (default 10 s). Roster entries and RCON bans are
+keyed by character name, so two players with the same name share one entry.
 
 ## Troubleshooting
 
 | Symptom | Look at |
 |---|---|
-| `/health` 503, `runtime_ready: false` | UE4SS did not load or a module failed. Check `%APPDATA%\Solarpunk\SolarpunkServerRuntime.log` and the `failed=` key in `.solarpunk-runtime-status`. |
-| `/health` 503, `runtime_ready: true`, `host_ready: false` | The stack loaded but the world never came up. Check `SolarpunkHost.log` and `.solarpunk-host-status` `reason=`. |
-| Server stops itself, log says FAIL-CLOSED | `SolarpunkAuth` is not publishing a fresh ready status. UE4SS bootstrap, `mods.txt` ordering, or a mod load error. |
-| Players connect but land on separate progress | Character name mismatch — the save key is derived from the lowercase name. |
-| Empty A2S player list while players are in-game | `roster.json` is not being written. Check `SolarpunkRoster.log`. |
+| `/health` 503, `runtime_ready: false` | UE4SS did not load or a module failed. Check `UE4SS.log` in the game's `ue4ss` folder, `%APPDATA%\Solarpunk\SolarpunkServerRuntime.log` (the account the game runs under) and the `failed=` key in `.solarpunk-runtime-status`. |
+| `/health` 503, `runtime_ready: true`, `host_ready: false` | The stack loaded but the world never came up. Check `SolarpunkServer\logs\SolarpunkHost.log`, `.solarpunk-host-status` `reason=`, and the game log for the Epic sign-in. |
+| No invite code line in `sp-ue.log` | The world did not open: read the end of `sp-ue.log` and `SolarpunkServer\logs\SolarpunkHost.log`. |
+| A returning player has a new character | They joined with a different Epic or Steam account. |
 | Everything breaks right after a game update | The PDB-derived AOB signatures went stale. Re-derive them against the new build. |
 
-Attach `logs\solarpunk-<date>.log` and the relevant `%APPDATA%\Solarpunk\*.log`
-to any bug report.
+Attach `SolarpunkServer\logs\solarpunk-<date>.log`, `SolarpunkServer\logs\SolarpunkHost.log`,
+the other module logs in `%APPDATA%\Solarpunk\` and `<GameUserDir>\sp-ue.log` to any bug report.

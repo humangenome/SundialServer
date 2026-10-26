@@ -9,44 +9,27 @@ The release zip extracts to a single `SolarpunkServer\` folder:
 
 ```
 SolarpunkServer\
-├── SolarpunkServer.exe        the host supervisor (RCON, A2S query, HTTP API, snapshots)
+├── SolarpunkServer.exe        the host supervisor (starts the game, RCON, A2S query, HTTP API)
 ├── appsettings.json           per-instance config
-├── ue4ss-server\              the in-game runtime — see "Staging the runtime" below
+├── ue4ss-server\              the in-game runtime (UE4SS and the server mods)
 │   ├── UE4SS.dll              UE4SS runtime (pinned build)
-│   ├── dwmapi.dll             UE4SS proxy loader
 │   ├── UE4SS-settings.ini     EngineVersionOverride 5.7 + scan tuning
 │   ├── UE4SS_Signatures\      5 PDB-derived AOB patterns for the current game build
-│   ├── SolarpunkPlugin.dll    native identity/IPC plugin
-│   └── Mods\                  the Sundial server mod stack (see docs/MODS.md)
+│   ├── SolarpunkEosIdentity.dll  gives this server its own Epic device identity
+│   ├── Mods\                  the Sundial server mod stack (see docs/MODS.md)
+│   ├── dwmapi.dll             old UE4SS proxy loader (the direct-IP path)
+│   └── SolarpunkPlugin.dll    old direct-IP plugin; never loaded on Solarpunk 1.3.0
 ├── logs\                      solarpunk-<date>.log, one JSON object per line, rolled daily
 └── data\                      hmac.key and local supervisor state
 ```
 
-`SolarpunkServer.exe` does **not** ship the game. Install Solarpunk separately
-under the folder named by `GameInstallRoot`.
+`SolarpunkServer.exe` does **not** ship the game.
 
-## Staging the runtime
+## Self-hosting
 
-The supervisor launches the game; it does **not** copy `ue4ss-server\` into the
-game folder for you. Copy the **contents** of `ue4ss-server\` into the game's
-Win64 directory before the first start:
-
-```
-<GameInstallRoot>\Solarpunk\Binaries\Win64\
-├── UE4SS.dll
-├── dwmapi.dll
-├── UE4SS-settings.ini
-├── SolarpunkPlugin.dll
-├── UE4SS_Signatures\
-└── Mods\
-```
-
-Windows auto-loads UE4SS through the `dwmapi.dll` proxy when the game starts
-from that directory. Re-copy after any game update that replaces files in
-`Binaries\Win64`. If `GET /api/v1/health` comes back with `runtime_ready: false`,
-this step is the first thing to re-check.
-
-A rented Survival Servers server does this staging for you.
+Self-hosting on the current Solarpunk version is not supported by the public package.
+The settings, ports, RCON commands and HTTP API below describe how the server is
+configured and controlled; a hosted server uses the same ones.
 
 ## Settings (`SolarpunkServer\appsettings.json`)
 
@@ -55,42 +38,43 @@ Everything lives under the top-level `Solarpunk` block. `Chat`, `Mods`, and
 
 At minimum set:
 
-- `InstanceId` — stable id for this instance; appears in logs, query rules, and every API response
-- `ServerName` — the public name shown in the launcher and Source query
-- `GameInstallRoot` — where the Solarpunk game files live
-- `GameplayPort` — the join port; the launcher derives RCON and HTTP from it
-- `RconPassword` — required for RCON, and the admin HTTP API signing key is derived from it
-- `SolarpunkAuthPassword` — the server-side join password (empty means an open server)
+- `InstanceId`: stable id for this instance; appears in logs, query rules and every API response
+- `ServerName`: the name Source query reports (server lists, status bots)
+- `GameInstallRoot`: where the Solarpunk game files live
+- `GameUserDir`: the game's user folder (world, Engine.ini, game log)
+- `Transport`: `eos` on Solarpunk 1.3.0, players join with the game's invite code. `ip` (the default when the key is missing) is the old direct-IP path and cannot open a world on Solarpunk 1.3.0
+- `GameplayPort`: the base port; query, RCON and the HTTP API sit at +2, +3 and +4
+- `RconPassword`: turns RCON on; the admin HTTP API signing key is derived from it
+- `SolarpunkAuthPassword`: a join password for the `ip` path only. Invite-code players cannot send it, so an `eos` server does not enforce it: the code is the way in
 
 Full setting table is in the [README](../README.md#server-settings).
 
 Two settings are commonly missed:
 
-- `MaxPlayers` is what the launcher and query clients report. It is a display
-  and admission figure, not a hard engine limit.
-- `PluginHeartbeatTimeoutSeconds` (default 30) is how long the supervisor waits
-  before treating the in-game runtime as unresponsive.
+- `MaxPlayers` is what query clients report. It is a display figure, not a hard
+  engine limit.
+- `PluginHeartbeatTimeoutSeconds` (default 30) sets how fresh the in-game status
+  files must be for `/api/v1/health` (see below).
 
 ## Ports
 
 | Offset | Default | Purpose | Proto |
 |---|---|---|---|
-| +0 | `GameplayPort` | Solarpunk gameplay — the join port | UDP |
-| +1 | `ControlPort` | local IPC identifier | — |
+| +0 | `GameplayPort` | the game's port pin (`ip` path: the join port) | UDP |
+| +1 | `ControlPort` | local IPC identifier | none |
 | +2 | `QueryPort` | Source A2S query | UDP |
 | +3 | `RconPort` | Source RCON | TCP |
 | +4 | `HttpPort` | admin HTTP API + live map | TCP |
 
-Open or forward every externally reachable port (+0, +2, +3, +4). The control
-port is a local IPC identifier and needs no firewall rule. The gameplay UDP
-port needs a Windows Defender inbound allow rule or players cannot reach the
-listen socket.
+On an `eos` server players join through Epic's peer-to-peer network with the
+invite code, not through the game port, so nothing has to be forwarded for them.
+Open the query port for server lists and status bots, and RCON or HTTP only if you
+use them from another machine. The control port is a local IPC identifier and
+needs no rule.
 
-The launcher derives RCON as gameplay+3 and admin HTTP as gameplay+4, so keep
-those offsets if you want the launcher's Console, Mods, and World tools to work
-against your server. The query port is editable per-server in the launcher.
-
-Run several instances on one box by spacing `GameplayPort` at least 5 apart.
+Run several instances on one box by spacing `GameplayPort` at least 5 apart. Each
+instance needs its own `GameUserDir`; `SolarpunkEosIdentity.dll` then gives each one
+its own Epic identity.
 
 ## RCON commands
 
@@ -104,30 +88,30 @@ SundialServer speaks Source RCON on `RconPort`. RCON is disabled while
 | `players` | connected players |
 | `ping` | liveness |
 | `save snapshot` | take a world snapshot |
-| `save list` | list saved worlds |
+| `save list` | list snapshots |
 | `say <msg>` | broadcast on the system channel |
 | `announce <msg>` | broadcast on the admin channel |
 | `motd [msg]` | read or set the MOTD |
-| `ban <player\|id> [reason]` | ban a player |
+| `ban <name\|id> [reason]` | ban a player by character name |
 | `unban <id>` | lift a ban |
 | `bans` | list bans |
 
 Mod-registered slash commands also run over RCON, with or without the leading
 `/`. See [MODS.md](MODS.md).
 
-Restoring a snapshot is **not** an RCON command — use the launcher's World
-backups dialog or `POST /api/v1/snapshots/<id>/restore` on the HTTP API.
+Restoring a snapshot is **not** an RCON command: use
+`POST /api/v1/snapshots/<id>/restore` on the HTTP API.
 
 ## Admin HTTP API
 
 Public, no auth:
 
-- `GET /api/v1/health` — liveness and the online decision
-- `GET /api/v1/players` — connected players
-- `GET /api/v1/manifest` — mod manifest ([spec](../protocol/manifest-v1.md))
-- `GET /api/v1/chat/motd` — the message of the day ([spec](../protocol/chat-v1.md))
-- `GET /map/` — the live map page ([spec](../protocol/map-v1.md))
-- `GET /api/v1/map/state` — map state, public only when `Map.Public` is `true`
+- `GET /api/v1/health`: liveness and the online decision
+- `GET /api/v1/players`: connected players
+- `GET /api/v1/manifest`: mod manifest ([spec](../protocol/manifest-v1.md))
+- `GET /api/v1/chat/motd`: the message of the day ([spec](../protocol/chat-v1.md))
+- `GET /map/`: the live map page ([spec](../protocol/map-v1.md))
+- `GET /api/v1/map/state`: map state, public only when `Map.Public` is `true`
 
 HMAC-signed:
 
@@ -177,8 +161,8 @@ Otherwise it returns `503` with the individual flags (`runtime_ready`,
 `plugin_heartbeat_fresh`, `game_process_alive`, `runtime_reason`) so you can see
 which stage failed. Freshness is `max(60s, PluginHeartbeatTimeoutSeconds * 3)`.
 
-If `ok` is false and `runtime_ready` is false, the UE4SS mod stack did not load
-— check `logs\` and the UE4SS log next to the game exe.
+If `ok` is false and `runtime_ready` is false, the UE4SS mod stack did not load:
+check `logs\` and `UE4SS.log` in the game's `ue4ss` folder.
 
 ## Snapshots
 
