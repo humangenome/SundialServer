@@ -1,7 +1,7 @@
 // SolarpunkEosIdentity - one Epic device identity per Solarpunk server process.
 //
-// Solarpunk 1.3.0 signs in to Epic Online Services through Redpoint EOS. With
-// [EpicOnlineServices] AuthenticationGraph=Anonymous a headless host signs in with an EOS
+// Solarpunk 1.3.0 signs in to Epic Online Services through Redpoint EOS. A headless host
+// signs in with an EOS
 // Connect device id. The EOS SDK keeps that device credential in the Windows Credential
 // Manager, which is per Windows user: every server under one account would share one Epic
 // identity and one peer-to-peer address, and a process started from a service or a key-only
