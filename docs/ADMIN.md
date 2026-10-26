@@ -45,6 +45,7 @@ At minimum set:
 - `Transport`: `eos` on Solarpunk 1.3.0, players join with the game's invite code. `ip` (the default when the key is missing) is the old direct-IP path and cannot open a world on Solarpunk 1.3.0
 - `GameplayPort`: the base port; query, RCON and the HTTP API sit at +2, +3 and +4
 - `RconPassword`: turns RCON on; the admin HTTP API signing key is derived from it
+- `AllowedReaders`: addresses allowed to reach the HTTP API at all, as a list (`["198.51.100.7"]`). Empty (the default) means anyone; loopback is always allowed
 - `SolarpunkAuthPassword`: a join password for the `ip` path only. Invite-code players cannot send it, so an `eos` server does not enforce it: the code is the way in
 
 Full setting table is in the [README](../README.md#server-settings).
@@ -103,6 +104,8 @@ Restoring a snapshot is **not** an RCON command: use
 `POST /api/v1/snapshots/<id>/restore` on the HTTP API.
 
 ## Admin HTTP API
+
+With `AllowedReaders` set, every other address gets `403` on every route, public ones included, before the request takes a slot.
 
 Public, no auth:
 
