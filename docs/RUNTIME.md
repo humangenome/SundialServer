@@ -79,7 +79,7 @@ ask the host for a save:
 2. Wait for `SolarpunkServer\runtime.save-done` to start with `<token> `.
    `saved` means the game logged a successful save and the world file holds it;
    `timeout`, `failed` or `skipped` (not in the game world) mean it did not.
-   The answer comes within about 2 s, or after 20 s at most.
+   The answer comes within about 2 s, or after 12 s at most.
 3. Stop the server.
 
 Do not ask within about 20 s of the game's own autosave (its

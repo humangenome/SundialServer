@@ -3263,7 +3263,7 @@ end)
 local SAVE_REQ_FILE = SP_DIR and (SP_DIR .. "\\runtime.save-request") or nil
 local SAVE_DONE_FILE = SP_DIR and (SP_DIR .. "\\runtime.save-done") or nil
 local GAME_LOG_FILE = INSTANCE_DIR and (INSTANCE_DIR .. "\\UserDir\\sp-ue.log") or nil
-local SAVE_WAIT_S = 20
+local SAVE_WAIT_S = 12
 local save_job = nil
 
 -- Copy the game's newest slot into <WorldName>.sav (and the ledger): "copied", "current" when the

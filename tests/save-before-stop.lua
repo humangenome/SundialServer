@@ -340,8 +340,8 @@ do
     W.ticks(TICKS_PER_S * 40)
     local answer, waited = W.ask("stop-20261026190500", "save")
     answer = answer or ""
-    check(answer:find("^stop%-20261026190500 timeout: no save line in 20 s") ~= nil, "[silent] answered timeout (" .. answer:gsub("%s+$", "") .. ")")
-    check(waited >= 20 and waited <= 22, "[silent] after 20-22 s (" .. tostring(waited) .. " s)")
+    check(answer:find("^stop%-20261026190500 timeout: no save line in 12 s") ~= nil, "[silent] answered timeout (" .. answer:gsub("%s+$", "") .. ")")
+    check(waited >= 12 and waited <= 14, "[silent] after 12-14 s (" .. tostring(waited) .. " s)")
 end
 
 -- 6. junk in the request: a token is cleaned, an unknown mode is refused
