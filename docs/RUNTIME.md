@@ -63,10 +63,30 @@ Two `appsettings.json` keys drive it:
 | Key | Default | Effect |
 |---|---|---|
 | `WorldName` | `World1` | the world save slot |
-| `SaveIntervalSeconds` | `300` | floor for forced `SaveToDisk`; the game's own autosave still runs |
+| `SaveIntervalSeconds` | `300` | how often the host re-pins the world slot; the game saves itself every 150 s of world time |
 
 Per-instance isolation comes from launching each instance with its own
 `LOCALAPPDATA`, which is what keeps two servers on one box from sharing a world.
+
+### Saving before a stop
+
+The game writes nothing when its process is ended, so a plain stop loses
+everything since the last autosave (up to 150 s). Before you stop the server,
+ask the host for a save:
+
+1. Write `<token> save` to `SolarpunkServer\runtime.save-request` (any token
+   of letters, digits, `-`, `_` or `.`).
+2. Wait for `SolarpunkServer\runtime.save-done` to start with `<token> `.
+   `saved` means the game logged a successful save and the world file holds it;
+   `timeout`, `failed` or `skipped` (not in the game world) mean it did not.
+   The answer comes within about 2 s, or after 12 s at most.
+3. Stop the server.
+
+Do not ask within about 20 s of the game's own autosave (its
+`Saving to '<slot>' was successful` line in the game log): a save stacked on
+an autosave once crashed the game's save code. If the game saved moments ago,
+write `<token> mirror` instead, which copies that save into the world file
+without saving again.
 
 ## Player identity and save shards
 

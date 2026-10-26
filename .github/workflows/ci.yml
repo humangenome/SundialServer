@@ -64,6 +64,7 @@ jobs:
           lua5.4 tests/world-upload-choice.lua
           lua5.4 tests/auth-eos-password.lua
           lua5.4 tests/host-scan-budget.lua
+          lua5.4 tests/save-before-stop.lua
 
       - name: The orchestrator is the only enabled mod
         run: |

@@ -3246,6 +3246,118 @@ SP.every("host-save-normalize", 15000, 7000, function()
     normalize_save_games_dir("sweep")
 end)
 
+-- SAVE BEFORE STOP. Stopping the game ends the process, and the game writes nothing when it is
+-- ended: everything since its last autosave (every 150 s of world time) was lost at every stop. The
+-- hoster's stop step writes <SolarpunkServer>\runtime.save-request ("<token> save" or
+-- "<token> mirror"), waits for runtime.save-done ("<token> <result> <unix time>"), then stops.
+--   save:   call the game's own BPC_SaveManager_C:SaveToDisk once, wait for the game log's
+--           "Saving to '<slot>' was successful" written after the request (SAVE_WAIT_S at most), then
+--           copy the slot into <WorldName>.sav and the upload ledger, so the next start loads it as
+--           this host's own world instead of taking it for a customer upload.
+--   mirror: the game saved moments ago; only the copy.
+-- Outside the game world the answer is "skipped". The stop step must not ask for "save" right next
+-- to the game's own autosave: a forced save one second after an autosave crashed the game's save
+-- code on 2026-09-11 (older game build and UE4SS). Its own function: the main chunk is at Lua's
+-- 200-local limit.
+;(function()
+local SAVE_REQ_FILE = SP_DIR and (SP_DIR .. "\\runtime.save-request") or nil
+local SAVE_DONE_FILE = SP_DIR and (SP_DIR .. "\\runtime.save-done") or nil
+local GAME_LOG_FILE = INSTANCE_DIR and (INSTANCE_DIR .. "\\UserDir\\sp-ue.log") or nil
+local SAVE_WAIT_S = 12
+local save_job = nil
+
+-- Copy the game's newest slot into <WorldName>.sav (and the ledger): "copied", "current" when the
+-- world file is already the newest save, or "copy-failed".
+local function copy_slot(reason)
+    if latest_active_world_save() == nil then return "current" end
+    return mirror_active_world_save(reason) and "copied" or "copy-failed"
+end
+
+local function save_answer(token, text)
+    log("save request " .. token .. ": " .. text)
+    if not SAVE_DONE_FILE then return end
+    local tmp = SAVE_DONE_FILE .. ".tmp"
+    local f = io.open(tmp, "w")
+    if not f then log("save request " .. token .. ": the answer could not be written") return end
+    f:write(token .. " " .. text .. " " .. tostring(os.time()) .. "\n")
+    f:close()
+    os.remove(SAVE_DONE_FILE)
+    os.rename(tmp, SAVE_DONE_FILE)
+end
+
+local function game_log_size()
+    if not GAME_LOG_FILE then return nil end
+    local f = io.open(GAME_LOG_FILE, "rb")
+    if not f then return nil end
+    local n = f:seek("end")
+    f:close()
+    return n
+end
+
+-- The slot of the last "Saving to '<slot>' was successful" line written after byte `from`, or nil.
+local function saved_slot_since(from)
+    if not (GAME_LOG_FILE and from) then return nil end
+    local f = io.open(GAME_LOG_FILE, "rb")
+    if not f then return nil end
+    local size = f:seek("end") or 0
+    if size < from then from = 0 end
+    local start = math.max(from, size - 4194304)
+    f:seek("set", start)
+    local text = f:read(size - start) or ""
+    f:close()
+    local slot = nil
+    for s in text:gmatch("Saving to '([^']+)' was successful") do slot = s end
+    return slot
+end
+
+SP.every("host-save-request", 1000, 500, function()
+    if not SAVE_REQ_FILE then return end
+    if save_job then
+        local slot = saved_slot_since(save_job.log_from)
+        local waited = os.time() - save_job.started
+        if not slot and waited < SAVE_WAIT_S then return end
+        local world = copy_slot(slot and "stop-save" or "stop-save-timeout")
+        if slot then
+            save_answer(save_job.token, "saved slot=" .. slot .. " world=" .. world .. " waited=" .. waited .. "s")
+        else
+            save_answer(save_job.token, "timeout: no save line in " .. SAVE_WAIT_S .. " s world=" .. world)
+        end
+        save_job = nil
+        return
+    end
+    local body = read_all(SAVE_REQ_FILE)
+    if not body then return end
+    os.remove(SAVE_REQ_FILE)
+    local token, mode = tostring(body):match("^%s*(%S+)%s*(%S*)")
+    if not token then return end
+    token = (token:gsub("[^%w%-%_%.]", "")):sub(1, 60)
+    if token == "" then return end
+    local gs = SP.kept("BP_SkyGameGameState_C")
+    local sm = SP.kept("BPC_SaveManager_C")
+    if not (runtime_hosted and gs ~= nil and sm ~= nil) then
+        save_answer(token, "skipped: not in the game world")
+        return
+    end
+    if mode == "mirror" then
+        save_answer(token, "mirrored world=" .. copy_slot("stop-mirror"))
+        return
+    end
+    if mode ~= "save" then
+        save_answer(token, "skipped: unknown mode '" .. mode:sub(1, 20) .. "'")
+        return
+    end
+    local from = game_log_size()
+    local ok, err = pcall(function() sm:SaveToDisk() end)
+    log("stop save: SaveToDisk ok=" .. tostring(ok) .. (ok and "" or (" err=" .. tostring(err))))
+    if not ok then
+        local world = copy_slot("stop-save-failed")
+        save_answer(token, "failed: SaveToDisk " .. tostring(err):gsub("%s+", " "):sub(1, 120) .. " world=" .. world)
+        return
+    end
+    save_job = { token = token, started = os.time(), log_from = from }
+end)
+end)()
+
 -- heartbeat into the host status file so the supervisor sees liveness
 SP.every("host-heartbeat", 30000, 4000, function()
     if not hosted then return end
