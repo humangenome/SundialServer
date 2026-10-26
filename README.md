@@ -9,7 +9,7 @@ SundialServer runs a **Solarpunk dedicated server** on a Windows machine. It sta
 
 Players join with the game's own invite code: in Solarpunk choose Multiplayer, Join session, Enter Code, and type the server's 5-letter code. The code changes each time the server starts. The [Sundial app](https://github.com/HumanGenome/Sundial) was for Solarpunk before 1.3.0 and cannot join a 1.3.0 server.
 
-A playable host also needs Sundial's in-game runtime (UE4SS plus Sundial's server mods and the native plugin). The **release zip bundles it** as an `ue4ss-server\` folder, and you copy its contents into the game's `Binaries\Win64` directory once. See [Installation](#installation) and [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime).
+The release zip bundles Sundial's in-game runtime (UE4SS and the server mods) as an `ue4ss-server\` folder next to the supervisor. Self-hosting on the current Solarpunk version is not supported by the public package.
 
 ## Features
 
@@ -45,17 +45,7 @@ Release builds are self-contained; a separate .NET install is not required for n
 [SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) runs SundialServer for you on Solarpunk 1.3.0. Its new servers use the game's own invite code (Multiplayer, Join session, Enter Code), so players do not need the Sundial app to join them.
 
 ### Self-host
-1. Download `SundialServer-v<version>.zip` from the [latest release](https://github.com/HumanGenome/SundialServer/releases/latest). It is self-contained: `SolarpunkServer\` (the supervisor + `appsettings.json`) plus the in-game runtime under `ue4ss-server\`.
-2. Extract it to a stable folder, such as `C:\Solarpunk\`.
-3. Install the Solarpunk game files under the folder set as `GameInstallRoot` (default `C:\Solarpunk\game`): copy your `steamapps\common\Solarpunk` folder there, or install with SteamCMD (app `1805110`). The server runs headless; no GPU is required.
-4. Copy the **contents** of `SolarpunkServer\ue4ss-server\` into `<GameInstallRoot>\Solarpunk\Binaries\Win64\`. The supervisor launches the game but does not stage the runtime for you (see [docs/ADMIN.md](docs/ADMIN.md#staging-the-runtime)).
-5. Edit `SolarpunkServer\appsettings.json` (see below).
-6. Open/forward the ports listed below.
-7. Run `SolarpunkServer\SolarpunkServer.exe`.
-
-These steps were written for Solarpunk before 1.3.0, when players joined by address with the Sundial app, and have not been redone for 1.3.0 yet. A server set up from them today does not open its world: a 1.3.0 host needs the Epic transport and identity settings that the [0.1.93 release notes](https://github.com/HumanGenome/SundialServer/releases/tag/v0.1.93) describe.
-
-> **Note:** the release zip is complete. It bundles the in-game runtime (UE4SS, Sundial's server mods and the native plugin) alongside the MIT-licensed supervisor. Without that runtime staged into the game's `Binaries\Win64`, the game comes up as a plain Solarpunk listen server with no password gate, chat feed, roster or admin tools. A rented Survival Servers server includes the runtime and stages it for you.
+Self-hosting on the current Solarpunk version is not supported by the public package.
 
 ## Server Settings
 
@@ -78,7 +68,7 @@ SundialServer reads `appsettings.json` (next to `SolarpunkServer.exe`) under the
 | `SnapshotsEnabled` | `true` | Auto-snapshot on every game auto-save. When `false`, only admin-triggered snapshots run. |
 | `PluginHeartbeatTimeoutSeconds` | `30` | Seconds before SundialServer treats the game runtime as unresponsive. |
 | `WorldName` | `World1` | World save slot. The world persists across restarts under this name. |
-| `SaveIntervalSeconds` | `300` | Floor for forced world saves. The game's own autosave still runs. |
+| `SaveIntervalSeconds` | `300` | How often the host re-pins the world slot. The game saves itself every 150 s of world time. |
 | `Mods` | empty | Mod manifest published at `GET /api/v1/manifest`: `Required`, `Recommended`, and `Blocked` lists. Re-read on edit; no restart needed. |
 
 Keep the ports unique for each server instance. The standard layout is:
@@ -135,7 +125,7 @@ unban <id>
 bans
 ```
 
-Mod-registered slash commands also run over RCON, with or without the leading `/`. Restoring a snapshot is **not** an RCON command: use the launcher's World backups dialog or the HTTP API.
+Mod-registered slash commands also run over RCON, with or without the leading `/`. Restoring a snapshot is **not** an RCON command: use the HTTP API.
 
 ## Build From Source
 
