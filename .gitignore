@@ -34,3 +34,6 @@ native/SolarpunkPlugin/minhook/
 
 # SolarpunkEosIdentity build output (built in CI, never committed)
 native/SolarpunkEosIdentity/*.dll
+
+# Compiled Lua from a local luac run (a 113 KB copy sat at the repo root from 9/08 to 10/26)
+luac.out
