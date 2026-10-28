@@ -70,7 +70,7 @@ public sealed class RconHostedService : IHostedService
         _log.LogDebug("RCON dispatch: cmd={Cmd} argLen={ArgLen}", head, rest.Length);
         return head switch
         {
-            "help"     => "commands: status, players, ping, save snapshot, save list, say <msg>, announce <msg>, motd [msg], ban <player|id> [reason], unban <id>, bans",
+            "help"     => HelpText,
             "status"   => BuildStatus(),
             "players"  => BuildPlayers(),
             "ping"     => "pong",
@@ -79,6 +79,7 @@ public sealed class RconHostedService : IHostedService
             "say"      => HandleChat(rest, "system"),
             "announce" => HandleChat(rest, "admin"),
             "motd"     => HandleMotd(rest),
+            "kick"     => await HandleKickAsync(rest).ConfigureAwait(false),
             "ban"      => HandleBan(rest),
             "unban"    => HandleUnban(rest),
             "bans"     => HandleBans(),
@@ -88,27 +89,58 @@ public sealed class RconHostedService : IHostedService
 
     private static long NowUnix() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-    // Resolve a "name or id" argument to a synthetic SolarpunkUserId. A bare
-    // synth id (765611900…) is used directly (works for offline players);
-    // otherwise match an online player's DisplayName case-insensitively.
-    private string? ResolveUserId(string arg)
+    internal const string HelpText =
+        "commands: status, players, ping, save snapshot, save list, say <msg>, announce <msg>, motd [msg], " +
+        "kick <player|id>, ban <player|id> [reason], unban <id>, bans (a name with spaces goes in quotes)";
+
+    // An account id: the Epic product user id the game keeps for a player who joined by invite
+    // code (32 hex characters, SkyGamePlayerState.SkyGameNativeId). The roster publishes it as that
+    // player's SolarpunkUserId, so bans and kicks key on it and two players who share a name stay
+    // apart. A synthetic id (765611900...) is a hash of a name: players who joined by address
+    // through the retired Sundial app have only that.
+    internal static bool IsAccountId(string s) => s.Length == 32 && s.All(Uri.IsHexDigit);
+    internal static bool IsSyntheticId(string s) =>
+        s.Length > 9 && s.StartsWith("765611900", StringComparison.Ordinal) && s.All(char.IsDigit);
+
+    // "<target> [rest]": the target is one word, or a quoted name ("Player 1").
+    internal static (string Target, string Tail) SplitTarget(string arg)
     {
         var a = arg.Trim();
-        if (a.StartsWith("765611900", StringComparison.Ordinal) && a.All(char.IsDigit)) return a;
-        var p = _state.Players.FirstOrDefault(x =>
-            string.Equals(x.DisplayName, a, StringComparison.OrdinalIgnoreCase));
-        return p?.SolarpunkUserId;
+        if (a.StartsWith('"'))
+        {
+            var end = a.IndexOf('"', 1);
+            if (end > 0) return (a[1..end].Trim(), a[(end + 1)..].Trim());
+            return (a[1..].Trim(), "");
+        }
+        var parts = a.Split(' ', 2);
+        return (parts[0].Trim(), parts.Length > 1 ? parts[1].Trim() : "");
+    }
+
+    // Resolve "name or id" to the id bans and kicks use. An id is used as given (works for
+    // offline players). A name must match exactly one online player and resolves to that
+    // player's roster id, which is the account id whenever the player has one: a name never
+    // turns into a ban on everyone who shares it.
+    internal static (string? Id, string? Error) ResolveUserId(string arg, IReadOnlyList<PlayerSnapshot> players)
+    {
+        var a = arg.Trim();
+        if (a.Length == 0) return (null, "no player given");
+        if (IsAccountId(a)) return (a.ToLowerInvariant(), null);
+        if (IsSyntheticId(a)) return (a, null);
+        var hits = players.Where(x => string.Equals(x.DisplayName, a, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (hits.Count == 0) return (null, $"no online player named '{a}'; use the id from players or bans");
+        if (hits.Count > 1) return (null, $"{hits.Count} players are named '{a}'; use the id from players");
+        var id = hits[0].SolarpunkUserId;
+        if (string.IsNullOrEmpty(id)) return (null, $"'{a}' has no id yet; try again in a few seconds");
+        return (IsAccountId(id) ? id.ToLowerInvariant() : id, null);
     }
 
     private string HandleBan(string rest)
     {
-        var parts = rest.Split(' ', 2);
-        var who = parts.Length > 0 ? parts[0].Trim() : "";
-        var reason = parts.Length > 1 ? parts[1].Trim() : "banned by admin";
-        if (string.IsNullOrEmpty(who)) return "usage: ban <playername|id> [reason]";
-        var id = ResolveUserId(who);
-        if (string.IsNullOrEmpty(id))
-            return $"ban: no online player named '{who}' — ban by synthetic id (765611900…) if offline";
+        var (who, reasonText) = SplitTarget(rest);
+        var reason = reasonText.Length > 0 ? reasonText : "banned by admin";
+        if (string.IsNullOrEmpty(who)) return "usage: ban <player|id> [reason]";
+        var (id, err) = ResolveUserId(who, _state.Players);
+        if (id is null) return $"ban: {err}";
         _saves.Database.AddBan(new BanRecord(id, reason, null, "rcon", NowUnix()));
         WriteBansFile();
         _log.LogInformation("RCON ban: id={Id} reason-len={Len}", id, reason.Length);
@@ -118,11 +150,33 @@ public sealed class RconHostedService : IHostedService
     private string HandleUnban(string rest)
     {
         var id = rest.Trim();
-        if (string.IsNullOrEmpty(id)) return "usage: unban <id 765611900…>";
+        if (string.IsNullOrEmpty(id)) return "usage: unban <id> (the id from bans)";
+        if (IsAccountId(id)) id = id.ToLowerInvariant();
+        else if (!IsSyntheticId(id)) return "unban: give the id from bans (a player name is not an id)";
         _saves.Database.RemoveBan(id);
         WriteBansFile();
         _log.LogInformation("RCON unban: id={Id}", id);
         return $"unbanned {id}";
+    }
+
+    // RCON kick: the game side (SolarpunkAuth) finds the player by id, sends the kick message and
+    // removes the player on the server if they are still connected 3 s later.
+    private async Task<string> HandleKickAsync(string rest)
+    {
+        var (who, _) = SplitTarget(rest);
+        if (string.IsNullOrEmpty(who)) return "usage: kick <player|id>";
+        var (id, err) = ResolveUserId(who, _state.Players);
+        if (id is null) return $"kick: {err}";
+        var result = await KickRequestFile.AskAsync(AppContext.BaseDirectory, id, TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        _log.LogInformation("RCON kick: id={Id} result={Result}", id, result ?? "no answer");
+        return result switch
+        {
+            null => "kick: no answer from the game in 5 s (is the server in its world?)",
+            "kicked" => $"kicked {who} ({id})",
+            "not-online" => $"kick: {who} ({id}) is not online",
+            "already-leaving" => $"kick: {who} ({id}) is already leaving",
+            _ => $"kick: {result}",
+        };
     }
 
     private string HandleBans()
@@ -202,13 +256,21 @@ public sealed class RconHostedService : IHostedService
     {
         var conn = _state.Connection;
         return conn is null
-            ? $"instance={_opts.InstanceId} plugin=disconnected"
+            ? $"instance={_opts.InstanceId} plugin=disconnected players={_state.EffectivePlayerCount}"
             : $"instance={_opts.InstanceId} plugin=connected pid={conn.PluginPid} version={conn.PluginVersion} players={_state.EffectivePlayerCount}";
     }
 
-    private string BuildPlayers()
+    private string BuildPlayers() => FormatPlayers(_state.Players, _state.EffectivePlayerCount);
+
+    // One line per player: name and id (the account id for invite-code players), so an admin can
+    // kick or ban the right one when names repeat.
+    internal static string FormatPlayers(IReadOnlyList<PlayerSnapshot> players, int count)
     {
-        var n = _state.EffectivePlayerCount;
-        return n == 0 ? "no players online" : $"{n} player(s) online (per-player names land in Phase 2)";
+        if (players.Count == 0)
+            return count == 0 ? "no players online" : $"{count} player(s) online (names not available yet)";
+        var sb = new StringBuilder($"{players.Count} player(s) online:");
+        foreach (var p in players.OrderBy(x => x.DisplayName, StringComparer.OrdinalIgnoreCase))
+            sb.Append('\n').Append("  ").Append(p.DisplayName).Append("  ").Append(p.SolarpunkUserId);
+        return sb.ToString();
     }
 }

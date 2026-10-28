@@ -335,20 +335,44 @@ local function synth_id(character)
     return string.format("765611900%09d", crc32(string.lower(character)) % 1000000000)
 end
 
-local BANS_PATH = STATUS_FILE_PATH and
-    STATUS_FILE_PATH:gsub("\\%.solarpunk%-auth%-status$", "\\bans.txt") or nil
-local BANNED = {}        -- [synth_id] = true
-local function load_bans()
-    if not BANS_PATH then return end
+-- BEGIN ban_list
+-- bans.txt holds one id per line: an account id (32 hex characters, the Epic id the game keeps
+-- for a player who joined by invite code, SP.account_id) or a synthetic id (765611900..., players
+-- who joined by address through the retired Sundial app). A player who HAS an account id is
+-- matched by it only: a synthetic id is a hash of the player name, and players share names
+-- ("Player 1" is the game's default), so a synthetic id must never ban them. Since 0.1.97.
+local BANLIST = {}
+function BANLIST.parse(body)
     local set = {}
-    local body = read_all(BANS_PATH)
-    if body then
-        for line in body:gmatch("[^\r\n]+") do
-            local id = line:match("^%s*(%d+)%s*$")
-            if id then set[id] = true end
+    for line in tostring(body or ""):gmatch("[^\r\n]+") do
+        local id = line:match("^%s*(%S+)%s*$")
+        if id then
+            id = id:lower()
+            if id:match("^%d+$") or (#id == 32 and id:match("^%x+$")) then set[id] = true end
         end
     end
-    BANNED = set
+    return set
+end
+function BANLIST.match(set, account_id, synth)
+    if account_id ~= nil and account_id ~= "" then
+        if set[account_id] then return account_id end
+        return nil
+    end
+    if synth ~= nil and synth ~= "" and set[synth] then return synth end
+    return nil
+end
+-- END ban_list
+
+local BANS_PATH = STATUS_FILE_PATH and
+    STATUS_FILE_PATH:gsub("\\%.solarpunk%-auth%-status$", "\\bans.txt") or nil
+local KICK_REQ_PATH = STATUS_FILE_PATH and
+    STATUS_FILE_PATH:gsub("\\%.solarpunk%-auth%-status$", "\\runtime.kick-request") or nil
+local KICK_DONE_PATH = STATUS_FILE_PATH and
+    STATUS_FILE_PATH:gsub("\\%.solarpunk%-auth%-status$", "\\runtime.kick-done") or nil
+local BANNED = {}        -- [account id or synthetic id] = true
+local function load_bans()
+    if not BANS_PATH then return end
+    BANNED = BANLIST.parse(read_all(BANS_PATH))
 end
 load_bans()
 
@@ -382,6 +406,8 @@ local function make_ftext(s)
 end
 local KICK_REASON = make_ftext("Server password incorrect.")
 local IDENTITY_KICK_REASON = make_ftext("Please close and reopen Sundial, then reconnect.")
+local BAN_KICK_REASON = make_ftext("You are banned from this server.")
+local ADMIN_KICK_REASON = make_ftext("You were removed from this server by its admin.")
 
 -- Find the active GameSession (for KickPlayer). Cached after first resolve.
 local g_game_session = nil
@@ -397,9 +423,18 @@ end
 
 -- Kick a controller ONCE. Never call this repeatedly on the same PC — kicking
 -- a half-torn-down PlayerController/NetConnection re-enters UE4SS dispatch on a
--- dying object and crashes. The single engine-sanctioned KickPlayer drops the
--- connection cleanly; ClientReturnToMainMenuWithTextReason is the fallback.
-local function kick_once(pc, reason)
+-- dying object and crashes.
+-- On 1.3.0 GameSession:KickPlayer is not a callable function (RedpointGameSession; the
+-- 2026-10-28 discovery lab), so the kick that works is the client message
+-- ClientReturnToMainMenuWithTextReason: the player's game leaves within a second, but the
+-- server never closes the connection itself, and a client that ignores the message stays.
+-- So every kick is also ENFORCED: KICK_ENFORCE_S later a controller that is still there loses
+-- its character and its controller on the server, the engine's own AGameSession::KickPlayer
+-- sequence (ClientWasKicked, Pawn->Destroy, Controller->Destroy). Since 0.1.97.
+local KICK_ENFORCE_S = 3
+local enforce = {}   -- [addr] = { pc = controller, due = unix time, why = "ban"|"admin"|"password"|"identity" }
+SP.kick_enforce = enforce
+local function kick_once(pc, reason, why)
     if not pc or not pc:IsValid() then return false end
     local kick_reason = reason or KICK_REASON
     local ok_any = false
@@ -408,9 +443,34 @@ local function kick_once(pc, reason)
         if pcall(function() gs:KickPlayer(pc, kick_reason) end) then ok_any = true end
     end
     if kick_reason ~= nil then
-        pcall(function() pc:ClientReturnToMainMenuWithTextReason(kick_reason) end)
+        if pcall(function() pc:ClientReturnToMainMenuWithTextReason(kick_reason) end) then ok_any = true end
     end
+    enforce[akey(pc)] = { pc = pc, due = os.time() + KICK_ENFORCE_S, why = why or "kick" }
     return ok_any
+end
+
+local function enforce_kicks()
+    local now = os.time()
+    for k, e in pairs(enforce) do
+        if now >= e.due then
+            enforce[k] = nil
+            local still = false
+            pcall(function() still = e.pc:IsValid() end)
+            if still then
+                local pawn, pawn_ok = nil, true
+                pcall(function() pawn = e.pc.Pawn end)
+                local pawn_valid = false
+                if pawn ~= nil then pcall(function() pawn_valid = pawn:IsValid() end) end
+                if pawn_valid then pawn_ok = pcall(function() pawn:K2_DestroyActor() end) end
+                local pc_ok = pcall(function() e.pc:K2_DestroyActor() end)
+                log("kick enforced (" .. tostring(e.why) .. ") [" .. tostring(k) .. "]: still connected after " ..
+                    KICK_ENFORCE_S .. " s; character removed=" .. tostring(pawn_valid and pawn_ok) ..
+                    " controller removed=" .. tostring(pc_ok))
+            else
+                log("kick done (" .. tostring(e.why) .. ") [" .. tostring(k) .. "]: the player left on the message")
+            end
+        end
+    end
 end
 
 -- Grace before kicking a not-yet-valid client. Solarpunk can overwrite the
@@ -450,16 +510,22 @@ local function evaluate(pc)
     -- half-loaded object (UE4SS-on-5.7 AV class). Verdicts that ALLOW are
     -- fine any time; verdicts that KICK wait until the transition settles.
     local can_kick = SP.settled(k)
-    -- Ban gate first: a banned synthetic id is rejected regardless of password.
-    if auth_character ~= "" and next(BANNED) ~= nil and BANNED[synth_id(auth_character)] then
+    -- Ban gate first: a banned id is rejected regardless of password. A player with an account
+    -- id is matched by it alone (BANLIST.match); the synthetic id is for players without one.
+    local banned_id = nil
+    if next(BANNED) ~= nil then
+        banned_id = BANLIST.match(BANNED, SP.account_id(pc),
+            auth_character ~= "" and synth_id(auth_character) or nil)
+    end
+    if banned_id then
         if not can_kick then
             if not first_seen[k] then first_seen[k] = os.time() end
             return
         end
         kicked[k] = true
         first_seen[k] = nil
-        log("auth DENY (banned) id=" .. synth_id(auth_character) .. " [" .. tostring(k) .. "] -- kicking")
-        kick_once(pc)
+        log("auth DENY (banned) id=" .. banned_id .. " [" .. tostring(k) .. "] -- kicking")
+        kick_once(pc, BAN_KICK_REASON, "ban")
         return
     end
     -- If a valid token appears after Solarpunk temporarily overwrote the
@@ -504,7 +570,7 @@ local function evaluate(pc)
             "' sid='" .. tostring(detail.sid or "") ..
             "' auth_recovered=" .. tostring(detail.auth_recovered == true) ..
             "' [" .. tostring(k) .. "] -- kicking (update Sundial)")
-        kick_once(pc, IDENTITY_KICK_REASON)
+        kick_once(pc, IDENTITY_KICK_REASON, "identity")
         return
     end
     -- Password gate: an empty CONFIGURED_PASSWORD means the server is open, so
@@ -517,7 +583,7 @@ local function evaluate(pc)
         first_seen[k] = nil
         log("auth DENY (transient identity) name='" .. tostring(raw) ..
             "' [" .. tostring(k) .. "] -- kicking (relaunch required)")
-        kick_once(pc, IDENTITY_KICK_REASON)
+        kick_once(pc, IDENTITY_KICK_REASON, "identity")
         return
     end
     if CONFIGURED_PASSWORD == "" then
@@ -543,7 +609,53 @@ local function evaluate(pc)
     log("auth DENY (password mismatch) name='" ..
         tostring(raw):gsub(AUTH_DELIM .. ".*", AUTH_DELIM .. "<redacted>") ..
         "' [" .. tostring(k) .. "] -- kicking (grace expired)")
-    kick_once(pc)
+    kick_once(pc, KICK_REASON, "password")
+end
+
+-- RCON `kick` (since 0.1.97): the supervisor writes runtime.kick-request = "<token> <id>", the id
+-- being what the roster publishes for that player (account id, or synthetic id for a player
+-- without one); answer runtime.kick-done = "<token> <result> <unix time>". Same match rule as
+-- bans: a player with an account id is found by it only.
+local function kick_answer(token, text)
+    log("kick request " .. token .. ": " .. text)
+    if not KICK_DONE_PATH then return end
+    local tmp = KICK_DONE_PATH .. ".tmp"
+    local f = io.open(tmp, "w")
+    if not f then return end
+    f:write(token .. " " .. text .. " " .. tostring(os.time()) .. "\n")
+    f:close()
+    os.remove(KICK_DONE_PATH)
+    os.rename(tmp, KICK_DONE_PATH)
+end
+local function handle_kick_request()
+    if not KICK_REQ_PATH then return end
+    local body = read_all(KICK_REQ_PATH)
+    if not body then return end
+    os.remove(KICK_REQ_PATH)
+    local token, id = tostring(body):match("^%s*(%S+)%s+(%S+)")
+    if not token then return end
+    token = (token:gsub("[^%w%-%_%.]", "")):sub(1, 60)
+    if token == "" then return end
+    id = tostring(id):lower()
+    local target = nil
+    for _, c in ipairs(SP.controllers() or {}) do
+        if c and c:IsValid() and not c:IsLocalPlayerController() then
+            local character = split_name(player_name(c))
+            local hit = BANLIST.match({ [id] = true }, SP.account_id(c),
+                character ~= "" and synth_id(character) or nil)
+            if hit then target = c end
+        end
+    end
+    if not target then kick_answer(token, "not-online") return end
+    local k = akey(target)
+    if kicked[k] then kick_answer(token, "already-leaving") return end
+    if not SP.settled(k) then kick_answer(token, "joining: try again in a few seconds") return end
+    kicked[k] = true
+    first_seen[k] = nil
+    verified[k] = nil
+    log("auth KICK (admin) id=" .. id .. " [" .. tostring(k) .. "]")
+    kick_once(target, ADMIN_KICK_REASON, "admin")
+    kick_answer(token, "kicked")
 end
 
 -- Always run the gate sweep. Open servers still need it for quarantined bad
@@ -572,6 +684,8 @@ SP.every("auth-sweep", 1000, 500, function()
             for k in pairs(verified) do verified[k] = nil end
         end
     end
+    pcall(enforce_kicks)
+    pcall(handle_kick_request)
     local cs = SP.controllers()
     if not cs then return end
     local live = {}

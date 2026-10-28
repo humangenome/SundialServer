@@ -281,6 +281,20 @@ function SP.kept(cname)
     return o
 end
 
+-- The player's account id as the game keeps it: SkyGamePlayerState.SkyGameNativeId, the Epic
+-- product user id of a player who joined by invite code (32 hex characters, e.g. 00025a60...;
+-- proven on 1.3.0 in the 2026-10-28 discovery lab). Lowercase, or nil when the player has none
+-- (address-joined players on the retired Sundial path). Roster, bans and kicks key players by it,
+-- so two players who share a name stay apart.
+function SP.account_id(pc)
+    local s = nil
+    pcall(function() s = pc.PlayerState.SkyGameNativeId:ToString() end)
+    if type(s) ~= "string" then return nil end
+    s = s:lower()
+    if #s ~= 32 or not s:match("^%x+$") or s:match("^0+$") then return nil end
+    return s
+end
+
 -- Players in the GameState's PlayerArray (nil while there is no GameState).
 function SP.player_count()
     local gs = SP.kept(GS_CLASS)
