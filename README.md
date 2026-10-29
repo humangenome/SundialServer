@@ -7,7 +7,7 @@
 
 SundialServer runs a **Solarpunk dedicated server** on a Windows machine. It starts the game headless with the Sundial runtime, watches the game process, takes and restores world snapshots, answers Source A2S query, runs Source RCON and serves an admin HTTP API.
 
-Players join with the game's own invite code: in Solarpunk choose Multiplayer, Join session, Enter Code, and type the server's 5-letter code. The code changes each time the server starts. The [Sundial app](https://github.com/HumanGenome/Sundial) was for Solarpunk before 1.3.0 and cannot join a 1.3.0 server.
+Players join with the game's own invite code: in Solarpunk's main menu choose Join session, type the server's 5-letter code and press Done. The code changes each time the server starts. The [Sundial app](https://github.com/HumanGenome/Sundial) was for Solarpunk before 1.3.0 and cannot join a 1.3.0 server.
 
 The release zip bundles Sundial's in-game runtime (UE4SS and the server mods) as an `ue4ss-server\` folder next to the supervisor. Self-hosting on the current Solarpunk version is not supported by the public package.
 
@@ -42,7 +42,7 @@ Release builds are self-contained; a separate .NET install is not required for n
 ## Installation
 
 ### Rent a server
-[SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) runs SundialServer for you on Solarpunk 1.3.0. Its new servers use the game's own invite code (Multiplayer, Join session, Enter Code), so players do not need the Sundial app to join them.
+[SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) runs SundialServer for you on Solarpunk 1.3.0. Its new servers use the game's own invite code (Join session on the game's main menu), so players do not need the Sundial app to join them.
 
 ### Self-host
 Self-hosting on the current Solarpunk version is not supported by the public package.

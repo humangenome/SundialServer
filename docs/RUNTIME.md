@@ -61,7 +61,7 @@ Solarpunk 1.3.0: the host crashes on the first join.
 passes its privilege check, creates the session, opens `/Game/Maps/MainLevel` and
 shows an invite code: the
 game log line `Setting invite code UI widget to "ABCDE"`. The code is new at every
-start. Players choose Multiplayer, Join session, Enter Code; the game's
+start. Players choose Join session on the game's main menu and type it; the game's
 `RedpointEOSNetDriver` carries the connection over Epic's peer-to-peer network, so
 the game port is not used for joining.
 
