@@ -10,7 +10,10 @@
 -- SolarpunkHost net-id enforcer keys saves for. The player id published as
 -- SolarpunkUserId is the SAME synthetic id (765611900 + crc32(lower(name)))
 -- the save/load keying uses, so the roster id == the save key == the
--- launcher-known identity.
+-- launcher-known identity. A player who joined by invite code carries an account id
+-- (SP.account_id: the Epic product user id the game keys them by); for them that id is
+-- the SolarpunkUserId, so two players who share a name are two entries (since 0.1.97;
+-- before, every "Player 1" collapsed into one row and the count read low).
 --
 -- roster.json schema:
 --
@@ -18,7 +21,7 @@
 --     "unix_ms": <write time ms>,
 --     "world": { "name": "<UWorld name>" },
 --     "players": [
---       { "SolarpunkUserId": "765611900NNNNNNNNN",
+--       { "SolarpunkUserId": "<account id> or 765611900NNNNNNNNN",
 --         "DisplayName": "<player name>",
 --         "ConnectedAtUnixMs": <ms>,
 --         "LastPacketUnixMs": <ms>,
@@ -249,11 +252,11 @@ local function rescan()
                     -- mid-transition or dying: keep an existing entry alive
                     -- (no fresh reads), pick the player up next tick.
                     local nm = player_name(c, k)
-                    if nm ~= "" then live[synth_id(nm)] = true end
+                    if nm ~= "" then live[SP.account_id(c) or synth_id(nm)] = true end
                 else
                     local nm = player_name(c, k)
                     if nm ~= "" then
-                        local id = synth_id(nm)
+                        local id = SP.account_id(c) or synth_id(nm)
                         live[id] = true
                         if not roster[id] then
                             roster[id] = { name = nm, joined_unix_ms = unix_ms() }

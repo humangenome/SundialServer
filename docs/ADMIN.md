@@ -86,16 +86,20 @@ SundialServer speaks Source RCON on `RconPort`. RCON is disabled while
 |---|---|
 | `help` | list commands |
 | `status` | server status |
-| `players` | connected players |
+| `players` | connected players, each with an id (the Epic account id for invite-code players) |
 | `ping` | liveness |
 | `save snapshot` | take a world snapshot |
 | `save list` | list snapshots |
 | `say <msg>` | broadcast on the system channel |
 | `announce <msg>` | broadcast on the admin channel |
 | `motd [msg]` | read or set the MOTD |
-| `ban <name\|id> [reason]` | ban a player by character name |
-| `unban <id>` | lift a ban |
+| `kick <name\|id>` | send a player off the server; one still connected 3 s later is removed by the server |
+| `ban <name\|id> [reason]` | ban a player; a name must match one online player, and invite-code players are banned by their Epic account id |
+| `unban <id>` | lift a ban (the id from `bans`) |
 | `bans` | list bans |
+
+A name with spaces goes in quotes: `kick "Player 1"`. When two players share a
+name, use the id from `players`.
 
 Mod-registered slash commands also run over RCON, with or without the leading
 `/`. See [MODS.md](MODS.md).

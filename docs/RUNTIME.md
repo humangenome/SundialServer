@@ -127,6 +127,11 @@ On an `eos` server the invite code is the way in. `SolarpunkAuthPassword` is not
 enforced there: invite-code players cannot send it. The password gate (a token
 in the player name on the old direct-IP path) applies to `"Transport": "ip"` only.
 
+Kicks (bans, RCON `kick`, a wrong password): on 1.3.0 the game's session cannot
+drop a player on the host's command (`GameSession:KickPlayer` is not callable), so
+the player first gets the game's own return-to-menu message, and a player still
+connected 3 seconds later loses their character and controller on the server.
+
 `HeartbeatWatchdogService` exists so a passworded `ip` server can never end up
 running open because the mod stack failed to load: if `.solarpunk-auth-status` is
 not a fresh `ready=1` past the grace window, the supervisor stops the game. It does
@@ -137,8 +142,12 @@ nothing on an `eos` server.
 `SolarpunkRoster` scans `GameState` and writes `roster.json` (players plus live
 X/Y/Z) every 5 seconds and on login and logout. That one file feeds the A2S player
 list, `GET /api/v1/players` and `GET /api/v1/map/state`. Map state is marked
-stale after `Map.StaleAfterMs` (default 10 s). Roster entries and RCON bans are
-keyed by character name, so two players with the same name share one entry.
+stale after `Map.StaleAfterMs` (default 10 s). Roster entries, RCON kicks and bans
+are keyed by the player's account id, the Epic id the game keeps for an
+invite-code player (`SkyGamePlayerState.SkyGameNativeId`), so two players with the
+same name stay apart. A player without one (the old direct-IP path) is keyed by
+character name, and a ban by such a name-based id never applies to a player who
+has an account id.
 
 ## Troubleshooting
 

@@ -23,7 +23,7 @@ Snapshots the world automatically on every game auto-save (when `SnapshotsEnable
 Answers standard Source A2S query on the configured query port so monitoring tools can read server name, map, player count, and the player list.
 
 ### 🛠 Source RCON
-Runs a Source-compatible RCON listener with `help`, `status`, `players`, `ping`, `save snapshot`, `save list`, `say`, `announce`, `motd`, `ban`, `unban` and `bans`, plus slash commands registered by server mods.
+Runs a Source-compatible RCON listener with `help`, `status`, `players`, `ping`, `save snapshot`, `save list`, `say`, `announce`, `motd`, `kick`, `ban`, `unban` and `bans`, plus slash commands registered by server mods.
 
 ### 🔐 Admin HTTP API
 Exposes snapshot list/upload/download/restore, save import, health, player list, and mod manifest endpoints. Admin routes are HMAC-signed with a key derived from the RCON password.
@@ -120,10 +120,13 @@ motd [message]
 ```
 
 ```text
+kick <player|id>
 ban <player|id> [reason]
 unban <id>
 bans
 ```
+
+`players` lists each player with an id: the player's Epic account id for invite-code players. Kick and ban by that id when two players share a name; a name with spaces goes in quotes (`kick "Player 1"`).
 
 Mod-registered slash commands also run over RCON, with or without the leading `/`. Restoring a snapshot is **not** an RCON command: use the HTTP API.
 
