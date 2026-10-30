@@ -7,7 +7,7 @@
 
 SundialServer runs a **Solarpunk dedicated server** on a Windows machine. It starts the game headless with the Sundial runtime, watches the game process, takes and restores world snapshots, answers Source A2S query, runs Source RCON and serves an admin HTTP API.
 
-Players join with the game's own invite code: in Solarpunk choose Multiplayer, Join session, Enter Code, and type the server's 5-letter code. The server keeps its code when it restarts. The [Sundial app](https://github.com/HumanGenome/Sundial) was for Solarpunk before 1.3.0 and cannot join a 1.3.0 server.
+Players join with the game's own invite code: in Solarpunk choose Multiplayer, Join session, Enter Code, and type the server's 5-letter code. The code changes each time the server starts. The [Sundial app](https://github.com/HumanGenome/Sundial) was for Solarpunk before 1.3.0 and cannot join a 1.3.0 server.
 
 The release zip bundles Sundial's in-game runtime (UE4SS and the server mods) as an `ue4ss-server\` folder next to the supervisor. Self-hosting on the current Solarpunk version is not supported by the public package.
 

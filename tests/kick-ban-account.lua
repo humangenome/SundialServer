@@ -1,4 +1,4 @@
--- Kick and ban by account id, kicks enforced on the server, invite code kept across restarts
+-- Kick and ban by account id, kicks enforced on the server
 -- (run from the repository root: lua5.4 tests/kick-ban-account.lua [path/to/server-mods]).
 --
 -- Loads the real SolarpunkServerRuntime and the six real modules against a stub engine (the
@@ -9,9 +9,7 @@
 --     without one;
 --   * GameSession:KickPlayer is not callable (as on 1.3.0): a player who ignores the kick
 --     message loses character and controller on the server 3 s later; one who leaves does not;
---   * RCON kick through runtime.kick-request / runtime.kick-done;
---   * the invite code: the first code is kept, the next start gets it back, a second call in
---     the same run goes through and is kept, KeepInviteCode off leaves the game alone.
+--   * RCON kick through runtime.kick-request / runtime.kick-done.
 -- Mocked engine: it checks the mods' bookkeeping, not a retail server.
 local MODS = arg[1] or "server-mods"
 
@@ -142,9 +140,7 @@ local function run_stack(opts)
         return h
     end
     W.files[SRV .. "\\SolarpunkServer\\appsettings.json"] =
-        '{ "Solarpunk": { "InstanceId": "host1", "WorldName": "World1", "Transport": "eos", "SolarpunkAuthPassword": ""' ..
-        (opts.keep_invite_code and (', "KeepInviteCode": "' .. opts.keep_invite_code .. '"') or "") .. ' } }'
-    if opts.kept_code then W.files[SRV .. "\\SolarpunkServer\\data\\invite-code.txt"] = opts.kept_code .. "\n" end
+        '{ "Solarpunk": { "InstanceId": "host1", "WorldName": "World1", "Transport": "eos", "SolarpunkAuthPassword": "" } }'
     W.write(SAVES .. "\\World1.sav", "CSAV-world-boot")
     W.files[GAME_LOG] = ""
 
@@ -396,38 +392,6 @@ do
     check(ask("t2 0002ffffffffffffffffffffffffffff"):find("^t2 not%-online ") ~= nil, "[kick] an id nobody has answers not-online")
     check(ask("t3 " .. synth("server-1a2b")):find("^t3 not%-online ") ~= nil, "[kick] the host's own controller is never a target")
     check(W.files[SP_DIR .. "\\runtime.kick-request"] == nil, "[kick] the request file is consumed")
-end
-
--- 6. invite code kept across restarts
-local HOOK = "/Game/Code/Framework/BP_SkyGameInstance.BP_SkyGameInstance_C:NewInviteCodeReceived"
-local function key_param(v) local p = { v = v, sets = 0 }; function p:get() return { ToString = function() return self.v end } end; function p:set(x) self.v = x; self.sets = self.sets + 1 end; return p end
-local KEPT = SP_DIR .. "\\data\\invite-code.txt"
-do
-    local W = in_world()
-    local hook = W.hooks[HOOK]
-    check(type(hook) == "function", "[code] the hook on NewInviteCodeReceived is installed on an eos server")
-    if hook then
-        local p = key_param("ABCDE"); hook(W.gi, p)
-        check(p.sets == 0 and (W.files[KEPT] or ""):match("^ABCDE") ~= nil, "[code] first start: the game's code is used and kept")
-    end
-end
-do
-    local W = run_stack({ kept_code = "ABCDE" }); W.ticks(TICKS_PER_S * 40)
-    local hook = W.hooks[HOOK]
-    if hook then
-        local p = key_param("QWERT"); hook(W.gi, p)
-        check(p.v == "ABCDE" and p.sets == 1, "[code] next start: the kept code replaces the game's new one (" .. tostring(p.v) .. ")")
-        check((W.files[KEPT] or ""):match("^ABCDE") ~= nil, "[code] the kept code stays")
-        local p2 = key_param("ZXCVB"); hook(W.gi, p2)
-        check(p2.v == "ZXCVB" and p2.sets == 0 and (W.files[KEPT] or ""):match("^ZXCVB") ~= nil,
-            "[code] a second call in the same run (the game's retry) goes through and is kept")
-    else
-        check(false, "[code] hook missing on the second start")
-    end
-end
-do
-    local W = run_stack({ kept_code = "ABCDE", keep_invite_code = "off" }); W.ticks(TICKS_PER_S * 40)
-    check(W.hooks[HOOK] == nil, "[code] KeepInviteCode off: no hook, the game's own code every start")
 end
 
 print(failures == 0 and "kick ban account: all passed" or (failures .. " failed"))

@@ -60,12 +60,8 @@ Solarpunk 1.3.0: the host crashes on the first join.
 `SolarpunkHost` calls the game's own `HostGame()`. The game then signs in to Epic,
 passes its privilege check, creates the session, opens `/Game/Maps/MainLevel` and
 shows an invite code: the
-game log line `Setting invite code UI widget to "ABCDE"`. The game makes a new code
-at every start; the host keeps the first one in `SolarpunkServer\data\invite-code.txt`
-and hands it back to the game at every later start, so players keep the same code.
-If the game asks again in the same start (it could not host with that code), its
-new code is used and kept instead. `"KeepInviteCode": "off"` gives a new code at
-every start. Players choose Multiplayer, Join session, Enter Code; the game's
+game log line `Setting invite code UI widget to "ABCDE"`. The code is new at every
+start. Players choose Multiplayer, Join session, Enter Code; the game's
 `RedpointEOSNetDriver` carries the connection over Epic's peer-to-peer network, so
 the game port is not used for joining.
 

@@ -154,8 +154,6 @@ if SP_DIR then
     if t and t:lower() == "eos" then TRANSPORT = "eos" end
     local ssr = extract_json_string(body, "SeparateServerRecord")
     if ssr and ssr:lower() == "on" then SEPARATE_SERVER_RECORD = true end
-    local kic = extract_json_string(body, "KeepInviteCode")
-    if kic and kic:lower() == "off" and _G.SolarpunkSP then _G.SolarpunkSP.keep_invite_code = false end
     local instance_id = extract_json_string(body, "InstanceId")
     if instance_id and instance_id ~= "" then
         instance_id = instance_id:gsub("[^%w%-%_]", ""):sub(1, 60)
@@ -165,7 +163,6 @@ if SP_DIR then
         " SaveIntervalSeconds=" .. SAVE_INTERVAL_S ..
         " HostIdentitySeed=" .. HOST_IDENTITY_SEED ..
         " Transport=" .. TRANSPORT .. " SeparateServerRecord=" .. tostring(SEPARATE_SERVER_RECORD) ..
-        " KeepInviteCode=" .. tostring(not (_G.SolarpunkSP and _G.SolarpunkSP.keep_invite_code == false)) ..
         " SaveGamesDir=" .. tostring(SAVE_GAMES_DIR))
 else
     log("config: SolarpunkServer dir not found; defaults WorldName=" .. WORLD_NAME)
@@ -2981,7 +2978,6 @@ SP.every("host-boot", 1000, 0, function()
     if TRANSPORT == "eos" then
         log("transport=eos: keeping the game's own net driver; players join with the invite code")
         try_install_server_record_hook(gi)
-        pcall(SP.try_install_invite_code_hook, gi)
     else pcall(function()
         local defs = eng.NetDriverDefinitions
         for i = 1, defs:GetArrayNum() do
@@ -3360,74 +3356,6 @@ SP.every("host-save-request", 1000, 500, function()
     end
     save_job = { token = token, started = os.time(), log_from = from }
 end)
-end)()
-
--- BEGIN invite_code_choice
--- The invite code survives restarts (since 0.1.97; Transport eos; appsettings KeepInviteCode, on
--- unless "off"). The game picks a random code at every start (CrossplaySubsystem:
--- GetNewRandomSessionKey) and hands it to the game instance's NewInviteCodeReceived(Key), which
--- hosts the session with it and shows it. The first code a server gets is kept in
--- <SolarpunkServer>\data\invite-code.txt (data\ survives package updates) and swapped into that call
--- at later starts. Only the FIRST call of a run is swapped: when the game asks again in the same
--- run (its own retry when a session does not come up, e.g. the kept code is taken), the game's
--- new code goes through and is kept from then on.
-local INVITE = {}
-function INVITE.clean(s)
-    s = tostring(s or ""):match("^%s*(%w+)%s*$")
-    if not s or #s < 4 or #s > 12 then return nil end
-    return s
-end
--- kept: the kept code (or nil); offered: the game's code; nth: which call of this run (1 = first).
--- Returns the code to use (nil = leave the call alone) and whether to keep it from now on.
-function INVITE.choose(kept, offered, nth)
-    offered = INVITE.clean(offered)
-    kept = INVITE.clean(kept)
-    if offered == nil then return nil, false end
-    if nth == 1 and kept ~= nil then return kept, false end
-    return offered, (kept == nil or kept:lower() ~= offered:lower())
-end
--- END invite_code_choice
-;(function()
-local INVITE_FILE = SP_DIR and (SP_DIR .. "\\data\\invite-code.txt") or nil
-local invite_hooked, invite_calls = false, 0
-local function keep_code(code)
-    os.execute('mkdir "' .. SP_DIR .. '\\data" >NUL 2>NUL')
-    local tmp = INVITE_FILE .. ".tmp"
-    local f = io.open(tmp, "w")
-    if not f then log("invite code: " .. code .. " could not be kept (data folder not writable)") return end
-    f:write(code .. "\n")
-    f:close()
-    os.remove(INVITE_FILE)
-    os.rename(tmp, INVITE_FILE)
-    log("invite code: " .. code .. " kept for the next starts")
-end
-function SP.try_install_invite_code_hook(gi)
-    if invite_hooked or TRANSPORT ~= "eos" or SP.keep_invite_code == false or not INVITE_FILE then return end
-    local cpath = nil
-    pcall(function() cpath = gi:GetClass():GetFullName():match("^%S+%s+(.+)$") end)
-    if not cpath then return end
-    local ok, err = pcall(function()
-        RegisterHook(cpath .. ":NewInviteCodeReceived", function(self, key)
-            invite_calls = invite_calls + 1
-            local offered = param_string(key)
-            local use, keep = INVITE.choose(read_all(INVITE_FILE), offered, invite_calls)
-            if use == nil then
-                log("invite code: the game's '" .. tostring(offered) .. "' is not a code; left alone")
-                return
-            end
-            if INVITE.clean(offered) ~= use then
-                local okset = pcall(function() key:set(use) end)
-                log("invite code: kept " .. use .. " used instead of the game's " .. tostring(offered) ..
-                    " (call " .. invite_calls .. ") set ok=" .. tostring(okset))
-            else
-                log("invite code: the game's " .. use .. " used (call " .. invite_calls .. ")")
-            end
-            if keep then keep_code(use) end
-        end)
-    end)
-    invite_hooked = ok
-    log("invite code hook " .. (ok and "installed" or ("FAILED " .. tostring(err))))
-end
 end)()
 
 -- heartbeat into the host status file so the supervisor sees liveness
