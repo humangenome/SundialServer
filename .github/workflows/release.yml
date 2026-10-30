@@ -232,6 +232,7 @@ jobs:
           lua5.4 tests/world-upload-choice.lua
           lua5.4 tests/auth-eos-password.lua
           lua5.4 tests/host-scan-budget.lua
+          lua5.4 tests/kick-ban-account.lua
 
       # The shipped plugin is a mingw-w64 build. That is not a preference: the
       # published v0.1.68 binary every host runs today is one, and this recipe
