@@ -185,6 +185,19 @@ public sealed class SolarpunkHttpService : BackgroundService
                     catch (ObjectDisposedException) { break; }
                     catch (OperationCanceledException) { break; }
 
+                    // AllowedReaders: a caller not on the list (when one is set) is refused before
+                    // it can take a request slot.
+                    if (!AdminRequestGate.ReaderAllowed(ctx.Request.RemoteEndPoint?.Address, _opts.AllowedReaders))
+                    {
+                        try
+                        {
+                            ctx.Response.StatusCode = 403;
+                            ctx.Response.Close();
+                        }
+                        catch { }
+                        continue;
+                    }
+
                     // Bounded concurrency, per class: refuse new requests if too many
                     // are already in flight rather than spawning unbounded
                     // Task.Run instances. Public reads have their own slots.

@@ -40,6 +40,15 @@ public sealed class SolarpunkServerOptions
     /// </summary>
     public long MaxUploadBytes { get; set; } = 2L * 1024 * 1024 * 1024;
 
+    /// <summary>
+    /// Addresses allowed to reach the HTTP API at all (public reads included), for example
+    /// the one machine that polls <c>/api/v1/health</c>. Empty (the default) = anyone, as before.
+    /// Loopback is always allowed. Anyone else gets 403 before the request takes a slot.
+    /// The check is in the supervisor, so it holds on a machine whose firewall allows all
+    /// inbound traffic and for a listener the firewall cannot tell apart by program.
+    /// </summary>
+    public List<string> AllowedReaders { get; set; } = new();
+
     public string RconPassword { get; set; } = "";
 
     /// <summary>

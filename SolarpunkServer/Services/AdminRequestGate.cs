@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography;
 
 namespace SolarpunkServer.Services;
@@ -66,6 +67,26 @@ public static class AdminRequestGate
         "/map",
         "/map/index.html",
     };
+
+    /// <summary>
+    /// <see cref="Configuration.SolarpunkServerOptions.AllowedReaders"/>: true when no list is set, when the
+    /// caller is loopback, or when its address (an IPv4-mapped IPv6 address read as IPv4) is listed.
+    /// Entries that are not IP addresses are ignored; an unknown caller is refused.
+    /// </summary>
+    public static bool ReaderAllowed(IPAddress? remote, IReadOnlyCollection<string>? allowed)
+    {
+        if (allowed is null || allowed.Count == 0) return true;
+        if (remote is null) return false;
+        if (remote.IsIPv4MappedToIPv6) remote = remote.MapToIPv4();
+        if (IPAddress.IsLoopback(remote)) return true;
+        foreach (var entry in allowed)
+        {
+            if (!IPAddress.TryParse((entry ?? "").Trim(), out var ip)) continue;
+            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+            if (ip.Equals(remote)) return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Public reads (what the panel and the launcher poll without a key) get their own request
