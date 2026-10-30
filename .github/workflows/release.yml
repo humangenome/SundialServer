@@ -56,7 +56,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve the release tag
         shell: bash
@@ -142,7 +142,7 @@ jobs:
           cat release-body.md
 
       - name: Upload the release body
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: release-body
           path: release-body.md
@@ -157,7 +157,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Fetch MinHook at the pinned commit
         shell: pwsh
@@ -200,7 +200,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve the release tag
         shell: bash
@@ -239,7 +239,21 @@ jobs:
       # source is a 200 KB binary with no export table -- almost certainly fine,
       # and not something to find out about on a live fleet.
       - name: Install the cross toolchain
-        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+        timeout-minutes: 20
+        run: |
+          # On 2026-10-26 the runners fetched small packages from the Azure Ubuntu mirror but stalled
+          # on the 11-15 MB ones for minutes. Use IPv4, bounded retries and per-request timeouts, and
+          # fall back from the main archive to the Azure mirror before giving up.
+          APT_OPTS="-o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
+          ok=0
+          for mirror in http://archive.ubuntu.com/ubuntu http://azure.archive.ubuntu.com/ubuntu; do
+            for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+              [ -f "$f" ] && sudo sed -i -E "s#http://(azure\.)?archive\.ubuntu\.com/ubuntu#$mirror#g" "$f"
+            done
+            if timeout 480 sudo apt-get $APT_OPTS update -qq && timeout 480 sudo apt-get $APT_OPTS install -y --no-install-recommends g++-mingw-w64-x86-64; then ok=1; break; fi
+            echo "apt install from $mirror failed; trying the next mirror"
+          done
+          [ "$ok" = 1 ] || { echo "toolchain install failed on every mirror"; exit 1; }
 
       - name: Build SolarpunkPlugin.dll
         run: bash native/SolarpunkPlugin/build.sh
@@ -300,7 +314,7 @@ jobs:
 
       - name: Download the release body
         if: github.event_name == 'push'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: release-body
 
@@ -340,7 +354,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download the published asset
         shell: bash
