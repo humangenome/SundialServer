@@ -4,7 +4,7 @@ namespace Solarpunk.Protocol;
 
 /// <summary>
 /// Wire protocol between SolarpunkPlugin.dll (UE4SS plugin loaded into the Sp
-/// process) and SolarpunkServer.exe (.NET 8 supervisor). Bumped on any
+/// process) and SolarpunkServer.exe (.NET 10 supervisor). Bumped on any
 /// breaking schema change.
 /// </summary>
 public static class ProtocolVersion

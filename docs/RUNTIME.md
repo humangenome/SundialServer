@@ -33,7 +33,7 @@ then runs alongside the game as its supervisor (query, RCON, HTTP).
 
 ## Layer responsibilities
 
-**SolarpunkServer.exe (.NET 8 supervisor).** Runs beside the game: Source A2S query, Source RCON,
+**SolarpunkServer.exe (.NET 10 supervisor).** Runs beside the game: Source A2S query, Source RCON,
 the HMAC-signed admin HTTP API, the chat ring buffer and save snapshots, and the
 `launch` verb above. It is self-contained: no separate .NET install.
 

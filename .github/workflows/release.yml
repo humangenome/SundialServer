@@ -212,8 +212,8 @@ jobs:
             echo "TAG=v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)" >> "$GITHUB_ENV"
           fi
 
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 

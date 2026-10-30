@@ -34,7 +34,7 @@ if [[ "v$SRC_VERSION" != "$TAG" ]]; then
   exit 1
 fi
 
-echo "==> Publishing SolarpunkServer (.NET 8, self-contained win-x64)"
+echo "==> Publishing SolarpunkServer (.NET 10, self-contained win-x64)"
 dotnet publish "$HERE/SolarpunkServer/SolarpunkServer.csproj" \
   -c Release -r win-x64 --self-contained -o "$STAGE/SolarpunkServer" --nologo >/dev/null
 
