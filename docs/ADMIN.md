@@ -93,7 +93,7 @@ SundialServer speaks Source RCON on `RconPort`. RCON is disabled while
 | `say <msg>` | broadcast on the system channel |
 | `announce <msg>` | broadcast on the admin channel |
 | `motd [msg]` | read or set the MOTD |
-| `kick <name\|id>` | send a player off the server; one still connected 3 s later is removed by the server |
+| `kick <name\|id>` | send a player off the server; one still connected 3 s later loses their character, and the connection stays until they leave |
 | `ban <name\|id> [reason]` | ban a player; a name must match one online player, and invite-code players are banned by their Epic account id |
 | `unban <id>` | lift a ban (the id from `bans`) |
 | `bans` | list bans |
