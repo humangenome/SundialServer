@@ -232,6 +232,7 @@ jobs:
           lua5.4 tests/world-upload-choice.lua
           lua5.4 tests/auth-eos-password.lua
           lua5.4 tests/host-scan-budget.lua
+          lua5.4 tests/save-before-stop.lua
           lua5.4 tests/kick-ban-account.lua
 
       # The shipped plugin is a mingw-w64 build. That is not a preference: the
@@ -245,13 +246,15 @@ jobs:
           # On 2026-10-26 the runners fetched small packages from the Azure Ubuntu mirror but stalled
           # on the 11-15 MB ones for minutes. Use IPv4, bounded retries and per-request timeouts, and
           # fall back from the main archive to the Azure mirror before giving up.
+          # The image now picks its mirror from /etc/apt/apt-mirrors.txt (a "mirror+file:" source), so
+          # that file needs the same rewrite, or the fallback changes nothing.
           APT_OPTS="-o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
           ok=0
           for mirror in http://archive.ubuntu.com/ubuntu http://azure.archive.ubuntu.com/ubuntu; do
-            for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
-              [ -f "$f" ] && sudo sed -i -E "s#http://(azure\.)?archive\.ubuntu\.com/ubuntu#$mirror#g" "$f"
+            for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
+              if [ -f "$f" ]; then sudo sed -i -E "s#http://(azure\.)?archive\.ubuntu\.com/ubuntu#$mirror#g" "$f"; fi
             done
-            if timeout 480 sudo apt-get $APT_OPTS update -qq && timeout 480 sudo apt-get $APT_OPTS install -y --no-install-recommends g++-mingw-w64-x86-64; then ok=1; break; fi
+            if sudo -E timeout 180 apt-get $APT_OPTS update -q && sudo -E timeout 420 apt-get $APT_OPTS install -y -q --no-install-recommends g++-mingw-w64-x86-64; then ok=1; break; fi
             echo "apt install from $mirror failed; trying the next mirror"
           done
           [ "$ok" = 1 ] || { echo "toolchain install failed on every mirror"; exit 1; }
