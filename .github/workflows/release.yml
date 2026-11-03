@@ -302,6 +302,12 @@ jobs:
       - name: Check the bundle layout
         run: python3 scripts/verify-server-bundle.py "dist/SundialServer-${TAG}.zip"
 
+      # .NET 10 refuses to start a CET-compatible exe on a machine whose CPU has CET but whose Windows build does
+      # not fully support it (2026-11-03, v0.1.97 on a Windows Server 2022 20348 host). The project sets
+      # CETCompat=false; this proves the shipped exe really carries the flag off.
+      - name: Check the server exe is not marked CET-compatible
+        run: python3 scripts/check-cet-compat.py "dist/SundialServer-${TAG}.zip"
+
       - name: Check the bundle carries nothing private
         run: python3 scripts/verify-bundle-privacy.py "dist/SundialServer-${TAG}.zip"
 
@@ -398,5 +404,6 @@ jobs:
           zip="published/SundialServer-${GITHUB_REF_NAME}.zip"
           python3 scripts/check-bundle-version.py "$zip" "${GITHUB_REF_NAME}"
           python3 scripts/verify-server-bundle.py "$zip"
+          python3 scripts/check-cet-compat.py "$zip"
           python3 scripts/verify-bundle-privacy.py "$zip"
           python3 scripts/verify-published-artifacts.py "$zip"

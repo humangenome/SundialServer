@@ -4,6 +4,11 @@
     <RootNamespace>SolarpunkServer</RootNamespace>
     <UserSecretsId>solarpunk-server-dev</UserSecretsId>
     <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- .NET 9+ marks the apphost CET-compatible (hardware shadow stacks) by default, and the runtime then refuses to
+         start on a machine whose CPU has CET but whose Windows build does not fully support it ("Your Windows doesn't
+         fully support CET"): seen on a Windows Server 2022 build 20348.320 host with a Zen 3 CPU, 2026-11-03.
+         scripts/check-cet-compat.py fails the release if the shipped exe carries the flag. -->
+    <CETCompat>false</CETCompat>
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="SolarpunkServer.Tests" />
