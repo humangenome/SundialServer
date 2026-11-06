@@ -70,27 +70,37 @@ jobs:
 
       - name: Guard the published source
         shell: bash
+        env:
+          SUNDIAL_DENY_PATTERN: ${{ github.event_name == 'push' && secrets.SUNDIAL_DENY_PATTERN || '' }}
         run: |
           # This repo is public. A short deny list guards the terms that must
           # never appear in it -- internal hosting references, an operator's
           # machine, support/host identifiers, and headless-auth residue from
-          # sibling projects. The list is encoded so that publishing the guard
-          # does not publish the strings it protects.
+          # sibling projects. The list lives in the repository secret
+          # SUNDIAL_DENY_PATTERN (one extended regular expression), not in this
+          # file: an encoded copy here published the strings it protects. It is
+          # passed on tag pushes only, and a tag push without it is refused. A
+          # manual run publishes nothing, gets no secret and skips this check.
+          # A hit prints the file and line only, because CI logs are public.
           #
-          # The exclusions matter as much as the list. Three files here carry
-          # deny-listed terms AS DATA: this workflow, the published-artifact
-          # scanner and the bundle privacy gate. Without excluding all three the
-          # guard trips on its own rule tables and no release can ever run --
-          # which is exactly what happened on a sibling repo, where every release
-          # failed from the day the scanner landed until the exclusion was added.
-          BANNED="$(printf '%s' 'c3NwYW5lbHxwYXNzcmNvbnxyeWFucGVubmluZ3RvbnxiLWNkblwubmV0fFN1bmRpYWxDbGllbnR8R29sZGJlcmd8Z29sZGJlcmd8Z2JlX2Zvcmt8c3RlYW1fYXBpNjR8c3RlYW1fc2V0dGluZ3N8Q29sZENsaWVudExvYWRlcnxbVHRdaWNrZXRbIF8jLV0/WzAtOV17Niw3fXxcYmdzWyBfLV0/WzAtOV17NSw3fVxifDUxXC4xNjFcLjEyXC4xMDN8NTFcLjc3XC4xMTlcLjE3WzU2XXwxOThcLjE5OVwuODZcLjE5' | base64 -d)"
-          if grep -rInE "$BANNED" \
+          # The published-artifact scanner and its workflow carry rule tables as
+          # data, so both are excluded.
+          BANNED="$(printf '%s' "${SUNDIAL_DENY_PATTERN:-}" | tr -d '\r\n')"
+          if [ -z "$BANNED" ]; then
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "::error::the deny list secret SUNDIAL_DENY_PATTERN is not set; refusing to release unchecked source"
+              exit 1
+            fi
+            echo "manual run: the deny list is not passed here (this run publishes nothing); skipped"
+            exit 0
+          fi
+          hits="$(grep -rnIE -e "$BANNED" \
                --exclude-dir=.git --exclude-dir=bin --exclude-dir=obj --exclude-dir=dist \
-               --exclude=release.yml \
                --exclude=verify-published-artifacts.py \
-               --exclude=verify-bundle-privacy.py \
-               --exclude=artifact-scan.yml . ; then
-            echo "::error::deny-listed term found in the published source"
+               --exclude=artifact-scan.yml . | cut -d: -f1,2 || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::deny-listed term found in the published source (file and line; the term is not shown):"
+            printf '%s\n' "$hits"
             exit 1
           fi
           echo "clean"
@@ -308,8 +318,18 @@ jobs:
       - name: Check the server exe is not marked CET-compatible
         run: python3 scripts/check-cet-compat.py "dist/SundialServer-${TAG}.zip"
 
+      # The privacy rules come from a repository secret on tag pushes only; a tag push without them is refused.
+      # A manual run publishes nothing, gets no rules and runs the archive checks alone.
       - name: Check the bundle carries nothing private
-        run: python3 scripts/verify-bundle-privacy.py "dist/SundialServer-${TAG}.zip"
+        env:
+          SUNDIAL_PRIVACY_RULES: ${{ github.event_name == 'push' && secrets.SUNDIAL_PRIVACY_RULES || '' }}
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            python3 scripts/verify-bundle-privacy.py --require-rules "dist/SundialServer-${TAG}.zip"
+          else
+            python3 scripts/verify-bundle-privacy.py "dist/SundialServer-${TAG}.zip"
+          fi
 
       - name: Check the bundle against the never-publish policy
         run: python3 scripts/verify-published-artifacts.py "dist/SundialServer-${TAG}.zip"
@@ -399,11 +419,13 @@ jobs:
 
       - name: Gate the downloaded artifact
         shell: bash
+        env:
+          SUNDIAL_PRIVACY_RULES: ${{ secrets.SUNDIAL_PRIVACY_RULES }}
         run: |
           set -euo pipefail
           zip="published/SundialServer-${GITHUB_REF_NAME}.zip"
           python3 scripts/check-bundle-version.py "$zip" "${GITHUB_REF_NAME}"
           python3 scripts/verify-server-bundle.py "$zip"
           python3 scripts/check-cet-compat.py "$zip"
-          python3 scripts/verify-bundle-privacy.py "$zip"
+          python3 scripts/verify-bundle-privacy.py --require-rules "$zip"
           python3 scripts/verify-published-artifacts.py "$zip"
