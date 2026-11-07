@@ -38,6 +38,20 @@ jobs:
             exit 1
           fi
 
+  # The server ships for Windows, and some socket behaviour differs there (a UDP reply to a
+  # closed port makes the next receive throw only on Windows), so the tests run there too.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Test
+        run: dotnet test tests/SolarpunkServer.Tests/SolarpunkServer.Tests.csproj -c Release --nologo
+
   lua:
     runs-on: ubuntu-latest
     steps:
