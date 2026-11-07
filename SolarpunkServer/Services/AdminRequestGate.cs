@@ -20,7 +20,15 @@ public enum GateVerdict
     StreamPreverified,
 }
 
-public readonly record struct GateDecision(GateVerdict Verdict, long Timestamp, string? ContentSha256);
+public readonly record struct GateDecision(GateVerdict Verdict, long Timestamp, string? ContentSha256)
+{
+    /// <summary>
+    /// A well-formed signature with a fresh timestamp that does not match: a guess at the key, which counts
+    /// toward the address's block. Missing or malformed headers, a stale timestamp (a clock problem) and a
+    /// replay do not.
+    /// </summary>
+    public bool WrongSignature { get; init; }
+}
 
 /// <summary>Which request limiter a request counts against.</summary>
 public enum RouteClass
@@ -127,7 +135,8 @@ public static class AdminRequestGate
             var declared = NormalizeSha256(contentShaHeader);
             if (declared is null) return Deny();
             var expected = HmacRequestAuth.Sign(key, HmacRequestAuth.CanonicalString(method, path, ts, declared));
-            if (!HmacRequestAuth.SignatureMatches(expected, signatureHeader)) return Deny();
+            if (!HmacRequestAuth.SignatureMatches(expected, signatureHeader))
+                return Deny() with { WrongSignature = NormalizeSha256(signatureHeader) is not null };
             if (!replay.TryAccept(signatureHeader, ts, nowUnixSeconds)) return Deny();
             return new GateDecision(GateVerdict.StreamPreverified, ts, declared);
         }
@@ -147,10 +156,31 @@ public static class AdminRequestGate
         string? signatureHeader,
         string bodySha256Hex,
         long nowUnixSeconds)
+        => VerifyBuffered(key, replay, method, path, timestamp, signatureHeader, bodySha256Hex, nowUnixSeconds, out _);
+
+    /// <param name="wrongSignature">
+    /// True when a well-formed signature did not match (a guess at the key, counted toward the address's
+    /// block); false for a match, a malformed signature and a replay.
+    /// </param>
+    public static bool VerifyBuffered(
+        byte[] key,
+        ReplayGuard replay,
+        string method,
+        string path,
+        long timestamp,
+        string? signatureHeader,
+        string bodySha256Hex,
+        long nowUnixSeconds,
+        out bool wrongSignature)
     {
+        wrongSignature = false;
         if (key.Length == 0 || string.IsNullOrWhiteSpace(signatureHeader)) return false;
         var expected = HmacRequestAuth.Sign(key, HmacRequestAuth.CanonicalString(method, path, timestamp, bodySha256Hex));
-        if (!HmacRequestAuth.SignatureMatches(expected, signatureHeader)) return false;
+        if (!HmacRequestAuth.SignatureMatches(expected, signatureHeader))
+        {
+            wrongSignature = NormalizeSha256(signatureHeader) is not null;
+            return false;
+        }
         return replay.TryAccept(signatureHeader, timestamp, nowUnixSeconds);
     }
 

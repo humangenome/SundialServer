@@ -27,6 +27,45 @@ public class AdminRequestGateTests
         => AdminRequestGate.Precheck(Key, g, method, path, ts, sig, contentSha, length, hasBody, MaxUpload, Now);
 
     [Fact]
+    public void Only_a_fresh_well_formed_wrong_signature_counts_as_a_guess()
+    {
+        var wrongKey = SHA256.HashData(Encoding.UTF8.GetBytes("guess"));
+        string WrongFor(string method, string path, long ts, string bodySha)
+            => HmacRequestAuth.Sign(wrongKey, HmacRequestAuth.CanonicalString(method, path, ts, bodySha));
+        var big = new byte[200_000];
+        var bigSha = Sha(big);
+        var empty = AdminRequestGate.EmptyBodySha256;
+
+        // Large body, signature over the declared hash: decided from the headers.
+        var g = new ReplayGuard(300);
+        Pre(g, Now.ToString(), WrongFor("POST", "/api/v1/snapshots", Now, bigSha), bigSha, big.Length, true)
+            .WrongSignature.Should().BeTrue();
+        Pre(g, Now.ToString(), SignFor("POST", "/api/v1/snapshots", Now, bigSha), bigSha, big.Length, true)
+            .WrongSignature.Should().BeFalse();
+        Pre(g, Now.ToString(), SignFor("POST", "/api/v1/snapshots", Now, bigSha), bigSha, big.Length, true)
+            .WrongSignature.Should().BeFalse("a replay is not a guess");
+        Pre(g, (Now - 3600).ToString(), WrongFor("POST", "/api/v1/snapshots", Now - 3600, bigSha), bigSha, big.Length, true)
+            .WrongSignature.Should().BeFalse("a stale timestamp is a clock problem");
+        var wrongBig = WrongFor("POST", "/api/v1/snapshots", Now, bigSha);
+        Pre(g, Now.ToString(), "zz" + wrongBig[2..], bigSha, big.Length, true)
+            .WrongSignature.Should().BeFalse("malformed, not a guess");
+        Pre(g, Now.ToString(), null, bigSha, big.Length, true).WrongSignature.Should().BeFalse();
+
+        // Small body (or none): checked after the bounded read.
+        var g2 = new ReplayGuard(300);
+        AdminRequestGate.VerifyBuffered(Key, g2, "GET", "/api/v1/info", Now, WrongFor("GET", "/api/v1/info", Now, empty), empty, Now, out var wrong)
+            .Should().BeFalse();
+        wrong.Should().BeTrue();
+        var right = SignFor("GET", "/api/v1/info", Now, empty);
+        AdminRequestGate.VerifyBuffered(Key, g2, "GET", "/api/v1/info", Now, right, empty, Now, out wrong).Should().BeTrue();
+        wrong.Should().BeFalse();
+        AdminRequestGate.VerifyBuffered(Key, g2, "GET", "/api/v1/info", Now, right, empty, Now, out wrong).Should().BeFalse();
+        wrong.Should().BeFalse("a replay is not a guess");
+        AdminRequestGate.VerifyBuffered(Key, g2, "GET", "/api/v1/info", Now, "zz" + right[2..], empty, Now, out wrong).Should().BeFalse();
+        wrong.Should().BeFalse("malformed, not a guess");
+    }
+
+    [Fact]
     public void No_signature_headers_is_unauthorized_before_any_body_is_read()
     {
         var g = new ReplayGuard(300);

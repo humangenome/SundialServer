@@ -9,6 +9,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Solarpunk.Rcon;
 
 namespace SolarpunkServer.Services;
 
@@ -440,6 +441,13 @@ public sealed class SolarpunkHttpService : BackgroundService
             }
             catch (GateRefusedException refused)
             {
+                if (refused.Status == 429)
+                {
+                    // Turned away before the body was read: close rather than drain it.
+                    res.KeepAlive = false;
+                    res.Headers["Retry-After"] = Math.Max(1, SourceGuard.BlockedSeconds(
+                        SourceGuard.SourceOf(req.RemoteEndPoint), SourceGuard.NowMs())).ToString();
+                }
                 await WriteJsonAsync(res, refused.Status, new { error = refused.Message });
                 return;
             }
@@ -674,6 +682,13 @@ public sealed class SolarpunkHttpService : BackgroundService
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var sigHeader = req.Headers[AdminRequestGate.SignatureHeader];
 
+        // An address turned away for wrong signatures (or wrong RCON passwords: the count is shared, it is
+        // the same password) is refused here, before a single body byte is read.
+        var source = SourceGuard.SourceOf(req.RemoteEndPoint);
+        var blocked = SourceGuard.BlockedSeconds(source, SourceGuard.NowMs());
+        if (blocked > 0)
+            throw new GateRefusedException(429, $"too many wrong signatures from this address; try again in {blocked} s");
+
         var decision = AdminRequestGate.Precheck(
             _authKey, _replayGuard, method, path,
             req.Headers[AdminRequestGate.TimestampHeader],
@@ -687,6 +702,7 @@ public sealed class SolarpunkHttpService : BackgroundService
         switch (decision.Verdict)
         {
             case GateVerdict.Unauthorized:
+                if (decision.WrongSignature) CountWrongSignature(source);
                 return null;
             case GateVerdict.TooLarge:
                 throw new BodyTooLargeException();
@@ -700,8 +716,12 @@ public sealed class SolarpunkHttpService : BackgroundService
                     ? await AdminRequestGate.ReadSmallAsync(req.InputStream, req.ContentLength64, AdminRequestGate.SmallBodyMaxBytes, ct).ConfigureAwait(false)
                     : Array.Empty<byte>();
                 var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-                if (!AdminRequestGate.VerifyBuffered(_authKey, _replayGuard, method, path, decision.Timestamp, sigHeader, sha, now))
+                if (!AdminRequestGate.VerifyBuffered(_authKey, _replayGuard, method, path, decision.Timestamp, sigHeader, sha, now, out var wrongSignature))
+                {
+                    if (wrongSignature) CountWrongSignature(source);
                     return null;
+                }
+                SourceGuard.Success(source);
                 // Authenticated: only now does any of the request reach the disk.
                 var tempPath = NewUploadTempPath();
                 try
@@ -717,6 +737,9 @@ public sealed class SolarpunkHttpService : BackgroundService
             }
             case GateVerdict.StreamPreverified:
             {
+                // The signature over the declared hash is verified: whoever sent it holds the key. A body that
+                // then does not match that hash is refused below but not counted as a guess.
+                SourceGuard.Success(source);
                 if (!await _uploadLimiter.WaitAsync(0, ct).ConfigureAwait(false))
                     throw new GateRefusedException(503, "another upload is in progress, retry shortly");
                 try
@@ -740,6 +763,14 @@ public sealed class SolarpunkHttpService : BackgroundService
             default:
                 return null;
         }
+    }
+
+    // A replay is not counted (two identical signed calls inside one second share a signature), and neither is
+    // a body that does not match a correctly signed hash. One warning line per block, never per wrong try.
+    private void CountWrongSignature(string source)
+    {
+        if (SourceGuard.Failure(source, SourceGuard.NowMs()))
+            _log.LogWarning("{BlockLine}", SourceGuard.BlockLine("http", source, SourceGuard.NowMs()));
     }
 
     private static string UploadTempDir => Path.Combine(Path.GetTempPath(), "solarpunk-uploads");
