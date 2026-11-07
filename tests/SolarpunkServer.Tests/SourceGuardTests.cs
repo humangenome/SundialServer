@@ -141,4 +141,17 @@ public sealed class SourceGuardTests : IDisposable
         SourceGuard.BlockedSeconds(Addr(0), t + 2_000).Should().BeGreaterThan(0);
         SourceGuard.BlockedSeconds(Addr(TableCeiling - 2), t + 2_000).Should().BeGreaterThan(0);
     }
+
+    [Fact]
+    public void A_table_full_of_blocks_logs_one_line_with_no_address_in_it()
+    {
+        const long t = 1_000_000;
+        for (var i = 0; i < TableLimit; i++) BlockNow(Addr(i), t);
+        SourceGuard.TakeNotice().Should().BeNull("the table is full but has not had to grow yet");
+
+        for (var i = TableLimit; i < TableLimit + 600; i++) BlockNow(Addr(i), t);
+        SourceGuard.TakeNotice().Should().Be(
+            "auth table full: all 4096 tracked addresses are blocked; every block is kept (up to 65536)");
+        SourceGuard.TakeNotice().Should().BeNull("one line, not one per address");
+    }
 }

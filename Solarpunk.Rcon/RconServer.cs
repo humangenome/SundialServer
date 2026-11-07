@@ -132,6 +132,7 @@ public sealed class RconServer : IDisposable
                         if (authenticated) SourceGuard.Success(source);
                         else if (SourceGuard.Failure(source, SourceGuard.NowMs()))
                             _log?.LogWarning("{BlockLine}", SourceGuard.BlockLine("rcon", source, SourceGuard.NowMs()));
+                        if (SourceGuard.TakeNotice() is { } tableNotice) _log?.LogWarning("{Notice}", tableNotice);
                         _log?.LogDebug("RCON auth {Result} from {Remote}",
                             authenticated ? "SUCCESS" : "FAIL", remote);
                         await WritePacketAsync(stream, id, 0, "", ct).ConfigureAwait(false);
