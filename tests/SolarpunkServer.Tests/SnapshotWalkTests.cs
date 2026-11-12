@@ -7,7 +7,8 @@ namespace SolarpunkServer.Tests;
 
 /// <summary>
 /// A snapshot never follows a link: a folder link (a junction on Windows) or a file link inside the
-/// save folder stays out of the zip, and a save folder that is itself a link is refused with no zip.
+/// save folder stays out of the zip (so does a file with a second name, a hard link), and a save folder
+/// that is itself a link is refused with no zip.
 /// </summary>
 public sealed class SnapshotWalkTests : IDisposable
 {
@@ -82,6 +83,21 @@ public sealed class SnapshotWalkTests : IDisposable
     }
 
     [Fact]
+    public void AFileWithASecondNameStaysOutOfTheSnapshot()
+    {
+        if (!OperatingSystem.IsWindows()) return; // the name count is read on Windows only (the servers run there)
+        var second = Path.Combine(Save, "linked-hard.txt");
+        RunCmd("mklink", "/H", second, Path.Combine(Outside, "outside.txt"));
+        Assert.Equal(2u, SnapshotWalk.HardLinkCount(second));
+        Assert.Equal(1u, SnapshotWalk.HardLinkCount(Path.Combine(Save, "top.sav")));
+
+        var left = SaveOrchestratorService.CreateSaveGamesZip(Save, Zip);
+
+        Assert.Equal(new[] { "linked-hard.txt" }, left);
+        Assert.DoesNotContain("linked-hard.txt", EntryNames());
+    }
+
+    [Fact]
     public void ASaveFolderThatIsALinkIsRefusedAndNoZipIsMade()
     {
         var linkedSave = Path.Combine(_root, "linked-save");
@@ -118,6 +134,11 @@ public sealed class SnapshotWalkTests : IDisposable
             Directory.CreateSymbolicLink(link, target);
             return;
         }
+        RunCmd("mklink", "/J", link, target);
+    }
+
+    private static void RunCmd(params string[] words)
+    {
         var psi = new ProcessStartInfo("cmd.exe")
         {
             UseShellExecute = false,
@@ -125,9 +146,9 @@ public sealed class SnapshotWalkTests : IDisposable
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        foreach (var a in new[] { "/d", "/c", "mklink", "/J", link, target }) psi.ArgumentList.Add(a);
+        foreach (var a in new[] { "/d", "/c" }.Concat(words)) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
         p.WaitForExit(30_000);
-        if (p.ExitCode != 0) throw new IOException("mklink /J failed: " + p.StandardError.ReadToEnd());
+        if (p.ExitCode != 0) throw new IOException(string.Join(' ', words.Take(2)) + " failed: " + p.StandardError.ReadToEnd());
     }
 }
