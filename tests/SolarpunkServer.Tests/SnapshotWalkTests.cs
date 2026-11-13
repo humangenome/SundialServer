@@ -120,6 +120,132 @@ public sealed class SnapshotWalkTests : IDisposable
 
         Assert.Contains("slot/.hidden.sav", EntryNames());
     }
+    // The server's own folder kept on a second drive, with two stand-in "drives" inside the test folder:
+    // C\servers\game\1001 is a link to D\servers\game\1001, and the save folder sits under it.
+    private string DriveC => Path.Combine(_root, "C") + Path.DirectorySeparatorChar;
+    private string DriveD => Path.Combine(_root, "D") + Path.DirectorySeparatorChar;
+    private string ServerC => Path.Combine(DriveC, "servers", "game", "1001");
+
+    private SecondDriveRule TwoDrives(bool targetFixed = true, string? serverFolder = null) => new()
+    {
+        ServerFolder = serverFolder ?? ServerC,
+        DriveOf = p => p.StartsWith(DriveC, StringComparison.Ordinal) ? DriveC : p.StartsWith(DriveD, StringComparison.Ordinal) ? DriveD : null,
+        IsFixedDrive = d => d != DriveD || targetFixed,
+    };
+
+    // ServerC links to D\servers\<game>\<number>; returns the save folder seen through ServerC.
+    private string MakeSecondDriveServer(string game = "game", string number = "1001")
+    {
+        var real = Path.Combine(DriveD, "servers", game, number);
+        Directory.CreateDirectory(Path.Combine(real, "UserDir", "Saved", "SaveGames", "slot"));
+        File.WriteAllText(Path.Combine(real, "UserDir", "Saved", "SaveGames", "slot", "world.sav"), "world");
+        Directory.CreateDirectory(Path.GetDirectoryName(ServerC)!);
+        MakeFolderLink(ServerC, real);
+        return Path.Combine(ServerC, "UserDir", "Saved", "SaveGames");
+    }
+
+    [Fact]
+    public void TheServersOwnFolderOnASecondDriveIsAccepted()
+    {
+        var save = MakeSecondDriveServer();
+        var left = new List<string>();
+
+        var files = SnapshotWalk.PlainFiles(save, left, out var walked, rule: TwoDrives());
+
+        Assert.Empty(left);
+        Assert.Equal(Path.Combine(DriveD, "servers", "game", "1001", "UserDir", "Saved", "SaveGames"), walked);
+        Assert.Equal(new[] { "slot/world.sav" }, files.Select(f => Path.GetRelativePath(walked, f).Replace('\\', '/')).ToArray());
+    }
+
+    [Fact]
+    public void BackupsStillWorkWhenTheServerFolderIsOnASecondDriveAndLinksInsideStayOut()
+    {
+        var save = MakeSecondDriveServer();
+        MakeFolderLink(Path.Combine(save, "slot", "linked"), Outside);
+
+        var left = SaveOrchestratorService.CreateSaveGamesZip(save, Zip, TwoDrives());
+
+        Assert.Equal(new[] { "slot/linked" }, left);
+        Assert.Equal(new[] { "slot/world.sav" }, EntryNames());
+    }
+
+    [Fact]
+    public void WithoutTheServerFolderNamedNoLinkAboveTheSaveFolderIsAccepted()
+    {
+        var save = MakeSecondDriveServer();
+
+        Assert.Throws<IOException>(() => SaveOrchestratorService.CreateSaveGamesZip(save, Zip));
+        Assert.False(File.Exists(Zip));
+    }
+
+    [Theory]
+    [InlineData("game", "1002")]
+    [InlineData("other", "1001")]
+    public void AServerFolderLinkToAnotherServersFolderIsRefused(string game, string number)
+    {
+        var save = MakeSecondDriveServer(game, number);
+
+        Assert.Throws<IOException>(() => SnapshotWalk.PlainFiles(save, new List<string>(), out _, rule: TwoDrives()));
+    }
+
+    [Fact]
+    public void AServerFolderLinkToADriveThatIsNotFixedIsRefused()
+    {
+        var save = MakeSecondDriveServer();
+
+        Assert.Throws<IOException>(() => SnapshotWalk.PlainFiles(save, new List<string>(), out _, rule: TwoDrives(targetFixed: false)));
+    }
+
+    [Fact]
+    public void AServerFolderLinkWhoseFolderIsItselfALinkIsRefused()
+    {
+        var hop = Path.Combine(_root, "hop");
+        Directory.CreateDirectory(Path.Combine(hop, "UserDir", "Saved", "SaveGames"));
+        var target = Path.Combine(DriveD, "servers", "game", "1001");
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        MakeFolderLink(target, hop);
+        Directory.CreateDirectory(Path.GetDirectoryName(ServerC)!);
+        MakeFolderLink(ServerC, target);
+
+        Assert.Throws<IOException>(() => SnapshotWalk.PlainFiles(Path.Combine(ServerC, "UserDir", "Saved", "SaveGames"), new List<string>(), out _, rule: TwoDrives()));
+    }
+
+    [Fact]
+    public void ALinkAnywhereElseAboveTheSaveFolderIsRefused()
+    {
+        // the server folder is real, but its UserDir links to the same path on the other drive
+        var real = Path.Combine(DriveD, "servers", "game", "1001");
+        Directory.CreateDirectory(Path.Combine(real, "UserDir", "Saved", "SaveGames"));
+        Directory.CreateDirectory(ServerC);
+        MakeFolderLink(Path.Combine(ServerC, "UserDir"), Path.Combine(real, "UserDir"));
+
+        Assert.Throws<IOException>(() => SnapshotWalk.PlainFiles(Path.Combine(ServerC, "UserDir", "Saved", "SaveGames"), new List<string>(), out _, rule: TwoDrives()));
+    }
+
+    [Fact]
+    public void ALinkOneLevelAboveTheServerFolderIsRefused()
+    {
+        // C\servers\game links to D\servers\game: the same path on another drive, but not the server's own folder
+        var realGame = Path.Combine(DriveD, "servers", "game");
+        Directory.CreateDirectory(Path.Combine(realGame, "1001", "UserDir", "Saved", "SaveGames"));
+        Directory.CreateDirectory(Path.Combine(DriveC, "servers"));
+        MakeFolderLink(Path.Combine(DriveC, "servers", "game"), realGame);
+
+        Assert.Throws<IOException>(() => SnapshotWalk.PlainFiles(Path.Combine(ServerC, "UserDir", "Saved", "SaveGames"), new List<string>(), out _, rule: TwoDrives()));
+    }
+
+    [Fact]
+    public void ASecondLinkUnderTheServerFolderLinkIsRefused()
+    {
+        var save = MakeSecondDriveServer();
+        var realSaved = Path.Combine(DriveD, "servers", "game", "1001", "UserDir", "Saved");
+        var elsewhere = Path.Combine(_root, "elsewhere-saved");
+        Directory.Move(realSaved, elsewhere);
+        MakeFolderLink(realSaved, elsewhere);
+
+        Assert.Throws<IOException>(() => SnapshotWalk.PlainFiles(save, new List<string>(), out _, rule: TwoDrives()));
+    }
+
     private string[] EntryNames()
     {
         using var zip = ZipFile.OpenRead(Zip);

@@ -177,7 +177,7 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
 
             var snapshotPath = Path.Combine(_opts.SaveDir, $"{snapshotId}.zip");
             var tmpPath = snapshotPath + ".tmp";
-            var linksLeftOut = CreateSaveGamesZip(sourceDir, tmpPath);
+            var linksLeftOut = CreateSaveGamesZip(sourceDir, tmpPath, SecondDriveRule.ForUserFolder(_opts.GameUserDir));
             if (linksLeftOut.Count > 0)
                 _log.LogWarning("Snapshot {Id}: {Count} link(s) in the save folder were left out, not followed: {Links}",
                     snapshotId, linksLeftOut.Count, string.Join(", ", linksLeftOut.Take(10)));
@@ -234,19 +234,20 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
     /// <summary>
     /// Zips the save tree to <paramref name="destinationPath"/> and returns the links in it that were
     /// left out. The walk never follows a link (<see cref="SnapshotWalk"/>), and the file list is made
-    /// before the zip exists, so a save folder that is itself a link is refused with nothing written.
+    /// before the zip exists, so a save folder under any link but the server's own folder kept on a
+    /// second drive is refused with nothing written. Zip names are relative to the real save folder.
     /// </summary>
-    internal static List<string> CreateSaveGamesZip(string sourceDir, string destinationPath)
+    internal static List<string> CreateSaveGamesZip(string sourceDir, string destinationPath, SecondDriveRule? rule = null)
     {
         var linksLeftOut = new List<string>();
-        var files = SnapshotWalk.PlainFiles(sourceDir, linksLeftOut);
+        var files = SnapshotWalk.PlainFiles(sourceDir, linksLeftOut, out var walkedRoot, rule: rule);
         using var archive = System.IO.Compression.ZipFile.Open(
             destinationPath,
             System.IO.Compression.ZipArchiveMode.Create);
 
         foreach (var file in files)
         {
-            var relativePath = Path.GetRelativePath(sourceDir, file).Replace('\\', '/');
+            var relativePath = Path.GetRelativePath(walkedRoot, file).Replace('\\', '/');
             archive.CreateEntryFromFile(file, relativePath, System.IO.Compression.CompressionLevel.Optimal);
         }
 
