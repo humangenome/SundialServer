@@ -1,7 +1,7 @@
 # SundialServer admin guide
 
-Raw controls for a self-hosted SundialServer. If you rent a hosted server, use
-your host's panel instead; it drives the same settings.
+Settings, ports and commands for running SundialServer yourself. If you rent a
+server, use your host's control panel instead. It changes the same settings.
 
 ## Server package layout
 
@@ -23,13 +23,11 @@ SolarpunkServer\
 └── data\                      hmac.key and local supervisor state
 ```
 
-`SolarpunkServer.exe` does **not** ship the game.
+## Host your own
 
-## Self-hosting
-
-Self-hosting on the current Solarpunk version is not supported by the public package.
-The settings, ports, RCON commands and HTTP API below describe how the server is
-configured and controlled; a hosted server uses the same ones.
+The SundialServer download doesn't support hosting your own server on the current
+Solarpunk version. A hosted server uses the same settings, ports, RCON commands and
+HTTP API below.
 
 ## Settings (`SolarpunkServer\appsettings.json`)
 
@@ -48,12 +46,12 @@ At minimum set:
 - `AllowedReaders`: addresses allowed to reach the HTTP API at all, as a list (`["198.51.100.7"]`). Empty (the default) means anyone; loopback is always allowed
 - `SolarpunkAuthPassword`: a join password for the `ip` path only. Invite-code players cannot send it, so an `eos` server does not enforce it: the code is the way in
 
-Full setting table is in the [README](../README.md#server-settings).
+The full settings table is in the [README](../README.md#settings).
 
 Two settings are commonly missed:
 
-- `MaxPlayers` is what query clients report. It is a display figure, not a hard
-  engine limit.
+- `MaxPlayers` is the maximum that server lists show. It doesn't change how many
+  players the game lets in.
 - `PluginHeartbeatTimeoutSeconds` (default 30) sets how fresh the in-game status
   files must be for `/api/v1/health` (see below).
 
@@ -73,9 +71,9 @@ Open the query port for server lists and status bots, and RCON or HTTP only if y
 use them from another machine. The control port is a local IPC identifier and
 needs no rule.
 
-Run several instances on one box by spacing `GameplayPort` at least 5 apart. Each
-instance needs its own `GameUserDir`; `SolarpunkEosIdentity.dll` then gives each one
-its own Epic identity.
+Run several servers on one machine by spacing `GameplayPort` at least 5 apart. Each
+one needs its own `GameUserDir`, and `SolarpunkEosIdentity.dll` then gives each its
+own Epic identity.
 
 ## RCON commands
 
@@ -88,13 +86,13 @@ SundialServer speaks Source RCON on `RconPort`. RCON is disabled while
 | `status` | server status |
 | `players` | connected players, each with an id (the Epic account id for invite-code players) |
 | `ping` | liveness |
-| `save snapshot` | take a world snapshot |
-| `save list` | list snapshots |
-| `say <msg>` | broadcast on the system channel |
-| `announce <msg>` | broadcast on the admin channel |
-| `motd [msg]` | read or set the MOTD |
-| `kick <name\|id>` | send a player off the server; one still connected 3 s later loses their character, and the connection stays until they leave |
-| `ban <name\|id> [reason]` | ban a player; a name must match one online player, and invite-code players are banned by their Epic account id |
+| `save snapshot` | take a world backup |
+| `save list` | list world backups |
+| `say <msg>` | message every player, shown as [Server] |
+| `announce <msg>` | message every player, shown as [Admin] |
+| `motd [msg]` | read or set the message of the day, shown to each player who joins |
+| `kick <name\|id>` | kick a player. A player still connected 3 seconds later loses their character on the server, and stays connected until they leave |
+| `ban <name\|id> [reason]` | ban a player. A name must match one online player, and invite-code players are banned by their Epic account id |
 | `unban <id>` | lift a ban (the id from `bans`) |
 | `bans` | list bans |
 
@@ -104,7 +102,7 @@ name, use the id from `players`.
 Mod-registered slash commands also run over RCON, with or without the leading
 `/`. See [MODS.md](MODS.md).
 
-Restoring a snapshot is **not** an RCON command: use
+RCON can't restore a backup. Use
 `POST /api/v1/snapshots/<id>/restore` on the HTTP API.
 
 ## Admin HTTP API
@@ -171,12 +169,13 @@ which stage failed. Freshness is `max(60s, PluginHeartbeatTimeoutSeconds * 3)`.
 If `ok` is false and `runtime_ready` is false, the UE4SS mod stack did not load:
 check `logs\` and `UE4SS.log` in the game's `ue4ss` folder.
 
-## Snapshots
+## World backups
 
-With `SnapshotsEnabled: true` (the default) the supervisor snapshots the world
-on every game auto-save, plus on admin trigger. Restore swaps the save directory
-atomically, and takes a pre-restore snapshot first, so a failed restore never
-leaves a half-written world and the operation stays reversible.
+With `SnapshotsEnabled: true` (the default), the server backs up the world after
+every game autosave and whenever an admin asks. Restore stops the game and backs
+up the last saved world first (play since the last autosave isn't in it), then
+swaps in the whole save folder in one step, so a failed restore never leaves a
+half-written world and you can always undo it.
 
 ## Server query
 

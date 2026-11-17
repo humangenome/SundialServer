@@ -1,7 +1,5 @@
 # Contributing to SundialServer
 
-Short and to the point.
-
 ## Reporting bugs
 
 Open an issue. Include:

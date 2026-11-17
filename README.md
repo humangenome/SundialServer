@@ -12,42 +12,42 @@
 
 # SundialServer
 
-SundialServer runs a **Solarpunk dedicated server** on Windows. Players join with the game's own invite code: in Solarpunk's main menu choose Join session, type the server's 5-letter code and press Done. The code changes each time the server starts.
+Solarpunk has no dedicated server. SundialServer runs a **Solarpunk dedicated server** on Windows. Players join with the game's own invite code: in Solarpunk's main menu choose Join session, type the server's 5-letter code and press Done. The code changes each time the server starts.
 
 Project page: [Sundial](https://github.com/HumanGenome/Sundial).
 
 ## What it does
 
-### 💾 Saved before every stop
-Before a stop, the server has the game save the world, so the minutes since its last autosave are kept. Whatever stops the server asks for it with one file: see [Saving before a stop](docs/RUNTIME.md#saving-before-a-stop).
+### Saved before every stop
+Before a stop, the server has the game save the world, so the minutes since its last autosave are kept. To get this save, whatever stops the server writes one file first: see [Saving before a stop](docs/RUNTIME.md#saving-before-a-stop).
 
-### 🗂 World backups
-Takes a snapshot of the world on request, and on every game autosave when `SnapshotsEnabled` is on. The HTTP API puts an earlier snapshot back, taking a snapshot of the running world first.
+### World backups
+The server backs up the world on request, and after every game autosave when `SnapshotsEnabled` is on (the default when you run it yourself). The admin API restores an earlier backup and backs up the last saved world first.
 
-### 📡 Shows up in server lists
+### Shows up in server lists
 Answers Source server query, so server lists, GameDig, LGSM monitors and Discord status bots can read the server's name, player count and player list.
 
-### 🖥 Server console
-Source RCON: see who is online, kick and ban players, take and list world snapshots. `players` lists each player with an id: the player's Epic account id for invite-code players. Kick and ban by that id when two players share a name; a name with spaces goes in quotes (`kick "Player 1"`). Every command is in [docs/ADMIN.md](docs/ADMIN.md).
+### Server console
+RCON: see who's online, kick and ban players, and take and list world backups. When two players share a name, kick or ban by the id that `players` shows. Every command is in [docs/ADMIN.md](docs/ADMIN.md).
 
-### 🔐 Admin API
-An HTTP API for health, players and snapshots. Admin routes are signed with a key derived from the RCON password, a request is checked before its body is stored, and `AllowedReaders` limits which addresses can reach it.
+### Admin API
+An HTTP API for server health, the player list and world backups. Admin requests are signed with a key made from the RCON password, and you can limit which addresses reach it.
 
 ## What you need
 
-Self-hosting on the current Solarpunk version is not supported by the public package. The ports and settings below are how a hosted server is set up.
+The SundialServer download doesn't support hosting your own server on the current Solarpunk version. The ports and settings below show how a hosted server is set up.
 
 - Windows 10, 11 or Server, 64-bit
-- Solarpunk's game files on the machine (SundialServer does not ship the game)
+- Solarpunk's game files on the machine
 
 ## Ports
 
 | Port | Protocol | Purpose |
 |---:|---|---|
-| `GameplayPort` | UDP | the game's port setting; players do not join through it |
+| `GameplayPort` | UDP | the game's port setting. Players don't join through it |
 | `GameplayPort + 2` | UDP | Source server query: open it for server lists |
 | `GameplayPort + 3` | TCP | RCON: open it only to use RCON from another machine |
-| `GameplayPort + 4` | TCP | admin HTTP API: same |
+| `GameplayPort + 4` | TCP | admin HTTP API: open it only to use the API from another machine |
 
 Players join through Epic's peer-to-peer network with the invite code, so nothing has to be forwarded for them.
 
@@ -59,20 +59,20 @@ Players join through Epic's peer-to-peer network with the invite code, so nothin
 |---|---|---|
 | `ServerName` | empty | the name Source query reports |
 | `InstanceId` | `default` | stable id in logs, query rules and API answers |
-| `Transport` | `ip` | `eos` on Solarpunk 1.3.0: players join with the invite code. `ip` is the old direct-IP path and cannot open a world on 1.3.0 |
+| `Transport` | `ip` | `eos` on Solarpunk 1.3.0: players join with the invite code. `ip` is the old Join by IP mode and can't open a world on 1.3.0 |
 | `GameplayPort` | `27015` | the base port; query, RCON and HTTP are +2, +3 and +4 |
-| `RconPassword` | empty | turns RCON on; the HTTP API's signing key comes from it |
-| `AllowedReaders` | empty | addresses allowed to reach the HTTP API; empty means anyone, and this machine is always allowed |
+| `RconPassword` | empty | turns RCON on. The HTTP API's signing key comes from it |
+| `AllowedReaders` | empty | addresses allowed to reach the HTTP API. Empty means anyone, and this machine is always allowed |
 | `MaxPlayers` | `4` | the slot count Source query reports |
 | `WorldName` | `World1` | the world's save name |
 | `SeparateServerRecord` | `off` | `on` for a world uploaded from single player, so its owner keeps their character |
-| `SnapshotsEnabled` | `true` | a snapshot on every game autosave |
+| `SnapshotsEnabled` | `true` | a world backup after every game autosave |
 
 Every setting, the HTTP API and the health check: [docs/ADMIN.md](docs/ADMIN.md).
 
 ## Rent a server
 
-[SurvivalServers.com Solarpunk hosting](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) runs SundialServer for you and shows the invite code in its control panel.
+[SurvivalServers.com](https://www.survivalservers.com/services/game_servers/solarpunk/?utm_source=github&utm_medium=readme_install&utm_campaign=sundialserver) runs Solarpunk servers with SundialServer installed. Your server's invite code is in Command Center.
 
 ## Build from source
 
@@ -87,18 +87,18 @@ dotnet test Solarpunk.Server.sln -c Release --no-build
 
 ## Releases
 
-CI cuts every release from a tag, never by hand, and checks the zip before and after publishing. Release notes are on the [releases page](https://github.com/HumanGenome/SundialServer/releases).
+GitHub Actions builds every release from a tag, never by hand, and checks the zip before and after it's published. Release notes are on the [releases page](https://github.com/HumanGenome/SundialServer/releases).
 
 ## Documentation
 
-- [docs/ADMIN.md](docs/ADMIN.md): settings, ports, RCON, the HTTP API, health, snapshots
+- [docs/ADMIN.md](docs/ADMIN.md): settings, ports, RCON, the HTTP API, health, world backups
 - [docs/RUNTIME.md](docs/RUNTIME.md): how the host boots, hosting and joining, the world, saving before a stop, troubleshooting
 - [docs/MODS.md](docs/MODS.md): the mod stack and its status files
 - [protocol/](protocol/): wire formats
 
 ## Contributing
 
-Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) lists what to include. Questions about a server you rent go to your host.
+Bugs: [open an issue](https://github.com/HumanGenome/SundialServer/issues). Pull requests are welcome, and [CONTRIBUTING.md](CONTRIBUTING.md) lists what to include. Questions about a server you rent go to your host.
 
 ## Community note
 

@@ -1,8 +1,8 @@
 # Sundial runtime
 
 How a Sundial host boots, what each layer does, and what to look at when a stage
-fails. Read [ADMIN.md](ADMIN.md) first for the settings and ports. Self-hosting on the
-current Solarpunk version is not supported by the public package.
+fails. Read [ADMIN.md](ADMIN.md) first for the settings and ports. The SundialServer
+download doesn't support hosting your own server on the current Solarpunk version.
 
 Solarpunk (Steam app `1805110`, Unreal Engine 5.7) ships no dedicated server.
 Sundial runs the retail game headless as a listen host on the game's own Epic
@@ -86,8 +86,8 @@ Two `appsettings.json` keys drive it:
 | `WorldName` | `World1` | the world save slot |
 | `SaveIntervalSeconds` | `300` | how often the host re-pins the world slot; the game saves itself every 150 s of world time |
 
-Each instance needs its own `GameUserDir`; that is what keeps two servers on one
-box from sharing a world.
+Each server needs its own `GameUserDir`. That's what keeps two servers on one
+machine from sharing a world.
 
 ### Saving before a stop
 
@@ -157,7 +157,7 @@ has an account id.
 | `/health` 503, `runtime_ready: true`, `host_ready: false` | The stack loaded but the world never came up. Check `SolarpunkServer\logs\SolarpunkHost.log`, `.solarpunk-host-status` `reason=`, and the game log for the Epic sign-in. |
 | No invite code line in `sp-ue.log` | The world did not open: read the end of `sp-ue.log` and `SolarpunkServer\logs\SolarpunkHost.log`. |
 | A returning player has a new character | They joined with a different Epic or Steam account. |
-| Everything breaks right after a game update | The PDB-derived AOB signatures went stale. Re-derive them against the new build. |
+| The server stops working right after a Solarpunk update | Wait for a new SundialServer release. A Solarpunk update needs one only when it changes something the server mods use. |
 
 Attach `SolarpunkServer\logs\solarpunk-<date>.log`, `SolarpunkServer\logs\SolarpunkHost.log`,
 the other module logs in `%APPDATA%\Solarpunk\` and `<GameUserDir>\sp-ue.log` to any bug report.

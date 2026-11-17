@@ -1,9 +1,9 @@
 # In-game runtime
 
-Everything the game process needs so a headless host loads the Sundial server
-mod stack. A hosted server's launcher copies the assembled `ue4ss-server\` contents
-into the game's `Binaries\Win64\ue4ss\` folder. Self-hosting on the current
-Solarpunk version is not supported by the public package.
+Everything the game needs to load the Sundial server mods on a dedicated server.
+A hosted server's launcher copies the assembled `ue4ss-server\` contents
+into the game's `Binaries\Win64\ue4ss\` folder. The SundialServer download
+doesn't support hosting your own server on the current Solarpunk version.
 
 `scripts/package-server.sh` assembles this tree plus the Lua mods from
 `../server-mods/` into the `ue4ss-server\` folder that ships inside the release
