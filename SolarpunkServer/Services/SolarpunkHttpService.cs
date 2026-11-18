@@ -577,6 +577,9 @@ public sealed class SolarpunkHttpService : BackgroundService
                 _saves.Database.RecordSnapshot(record);
                 _saves.Database.Audit("http-api", "snapshot.upload", snapshotId,
                     $"{{\"bytes\":{record.SizeBytes}}}", record.TakenUnix);
+                // Uploads count toward the snapshot room too (MaxSnapshotsKept / MaxSnapshotBytes); this one is
+                // the newest, so it stays.
+                _saves.RotateOldSnapshots();
 
                 await WriteJsonAsync(res, 200, new
                 {

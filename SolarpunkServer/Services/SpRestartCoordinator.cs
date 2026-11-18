@@ -31,6 +31,10 @@ public sealed class SpRestartCoordinator
     private readonly ILogger<SpRestartCoordinator> _log;
     private readonly SolarpunkServerOptions _opts;
     private readonly SemaphoreSlim _restoreGate = new(1, 1);
+    private int _killRequests;
+
+    /// <summary>How many times <see cref="KillGame"/> was called (tests: it does nothing off Windows).</summary>
+    internal int KillRequests => Volatile.Read(ref _killRequests);
 
     public SpRestartCoordinator(ILogger<SpRestartCoordinator> log, IOptions<SolarpunkServerOptions> opts)
     {
@@ -59,6 +63,7 @@ public sealed class SpRestartCoordinator
     /// </summary>
     public void KillGame(TimeSpan waitForExit)
     {
+        Interlocked.Increment(ref _killRequests);
         if (!OperatingSystem.IsWindows()) return;
 
         var installRoot = NormalizeForCompare(_opts.GameInstallRoot);
