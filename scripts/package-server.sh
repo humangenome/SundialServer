@@ -38,6 +38,11 @@ echo "==> Publishing SolarpunkServer (.NET 10, self-contained win-x64)"
 dotnet publish "$HERE/SolarpunkServer/SolarpunkServer.csproj" \
   -c Release -r win-x64 --self-contained -o "$STAGE/SolarpunkServer" --nologo >/dev/null
 
+# Self-contained, so the .NET runtime (and ASP.NET Core) ships beside the exe: their licence and
+# third-party notices go with it, from the runtime packs named in SolarpunkServer.deps.json.
+echo "==> Staging the .NET runtime's licence notices"
+python3 "$HERE/scripts/stage-dotnet-notices.py" "$STAGE/SolarpunkServer"
+
 echo "==> Staging the in-game runtime (settings + signatures + mods)"
 RT="$STAGE/SolarpunkServer/ue4ss-server"
 mkdir -p "$RT/Mods"
@@ -104,6 +109,7 @@ ZIP="$OUT/SundialServer-${TAG}.zip"; rm -f "$ZIP"
 # the sha printed below cannot tell you anything about whether it works.
 echo "==> Verifying the bundle layout"
 python3 "$HERE/scripts/verify-server-bundle.py" "$ZIP"
+python3 "$HERE/scripts/verify-release-notices.py" server "$ZIP"
 
 SHA="$(openssl dgst -sha256 "$ZIP" | awk '{print $2}')"
 echo

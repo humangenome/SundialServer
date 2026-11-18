@@ -24,6 +24,9 @@ jobs:
       - name: Test
         run: dotnet test Solarpunk.Server.sln -c Release --no-build --nologo
 
+      - name: Licence-notice check (its own tests)
+        run: python3 scripts/test-verify-release-notices.py
+
       # The released binary reports its version from Directory.Build.props, so a
       # tag that disagrees with the source ships a server that lies about what
       # it is. Fail the tag instead.
