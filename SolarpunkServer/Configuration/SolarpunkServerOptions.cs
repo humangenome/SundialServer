@@ -41,6 +41,47 @@ public sealed class SolarpunkServerOptions
     public long MaxUploadBytes { get; set; } = 2L * 1024 * 1024 * 1024;
 
     /// <summary>
+    /// What a world zip (restore, import, migrate) may unpack to, checked before the game is stopped and before
+    /// anything is written: all entries together, the number of entries, any one entry, and the free space the
+    /// unpack must leave on the disk. A small zip can unpack to far more than its upload size. A real Solarpunk
+    /// save folder is far below these (the largest seen in November 2026 was under 150 MB zipped, most of it the
+    /// set-aside world files); 4 GB is twice <see cref="MaxUploadBytes"/>.
+    /// </summary>
+    public long MaxRestoreUnpackedBytes { get; set; } = 4L * 1024 * 1024 * 1024;
+
+    /// <summary>See <see cref="MaxRestoreUnpackedBytes"/>.</summary>
+    public int MaxRestoreEntries { get; set; } = 10_000;
+
+    /// <summary>See <see cref="MaxRestoreUnpackedBytes"/>.</summary>
+    public long MaxRestoreEntryBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>See <see cref="MaxRestoreUnpackedBytes"/>. 0 turns the free-space check off.</summary>
+    public long RestoreFreeSpaceFloorBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Room for stored world backups in <see cref="SaveDir"/> (backups taken here, the copy each restore takes
+    /// first, and uploads): the newest <see cref="MaxSnapshotsKept"/> are kept while they fit in
+    /// <see cref="MaxSnapshotBytes"/> together, counted from the newest, and older ones are removed. 30 days
+    /// still removes any. The newest one, and one a restore is reading, are always kept. 0 turns that limit
+    /// off. Applied after every backup, upload and restore.
+    /// </summary>
+    public int MaxSnapshotsKept { get; set; } = 20;
+
+    /// <summary>See <see cref="MaxSnapshotsKept"/>.</summary>
+    public long MaxSnapshotBytes { get; set; } = 4L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Room for the world files the host mod sets aside in SaveGames\_sundial_orphaned_saves (the world an
+    /// upload replaced, and stale copies of the world the game made): the newest <see cref="MaxOrphanedSavesKept"/>
+    /// within <see cref="MaxOrphanedSavesBytes"/>, the same rule as snapshots without the age limit. 0 turns that
+    /// limit off. Applied at start and after every snapshot rotation.
+    /// </summary>
+    public int MaxOrphanedSavesKept { get; set; } = 20;
+
+    /// <summary>See <see cref="MaxOrphanedSavesKept"/>.</summary>
+    public long MaxOrphanedSavesBytes { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>
     /// Addresses allowed to reach the HTTP API at all (public reads included), for example
     /// the one machine that polls <c>/api/v1/health</c>. Empty (the default) = anyone, as before.
     /// Loopback is always allowed. Anyone else gets 403 before the request takes a slot.
