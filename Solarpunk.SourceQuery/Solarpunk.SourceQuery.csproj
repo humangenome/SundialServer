@@ -3,6 +3,9 @@
     <RootNamespace>Solarpunk.SourceQuery</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="SolarpunkServer.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../Solarpunk.Abstractions/Solarpunk.Abstractions.csproj" />
   </ItemGroup>
 </Project>

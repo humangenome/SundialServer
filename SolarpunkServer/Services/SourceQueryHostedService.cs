@@ -38,7 +38,8 @@ public sealed class SourceQueryHostedService : IHostedService, IAsyncDisposable
             BuildPlayers,
             BuildRules,
             IsGameOnline,
-            queryObserver: (type, remote) => _log.LogDebug("A2S query {Type} from {Remote}", type, remote));
+            queryObserver: (type, remote) => _log.LogDebug("A2S query {Type} from {Remote}", type, remote),
+            notice: line => _log.LogWarning("{Notice}", line));
         _log.LogInformation("Source A2S query listening on UDP {Port}", _server.BoundPort);
         return _server.StartAsync(ct);
     }
