@@ -79,6 +79,7 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
     {
         _log.LogInformation("Save orchestrator ready; db={Path}, save_dir={Dir}, snapshots_enabled={Enabled}",
             _dbPath, _opts.SaveDir, _opts.SnapshotsEnabled);
+        _foundBackupsListing = Task.Run(() => ListBackupsFoundOnDiskAsync(DateTime.UtcNow));
         if (_opts.SnapshotsEnabled)
         {
             TryStartFileWatcher();
@@ -263,6 +264,47 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
         if (_opts.RestoreFreeSpaceFloorBytes <= 0) return true;
         var files = SnapshotWalk.PlainFiles(sourceDir, new List<string>(), out _, rule: FolderRule(_opts.GameUserDir));
         return HasRoomForBackup(files.Sum(file => new FileInfo(file).Length));
+    }
+
+    private Task? _foundBackupsListing;
+
+    // At a start, a backup zip in SaveDir that the list doesn't have (a server moved to another machine, a list
+    // that was lost, a zip put there by hand) is listed as one of unknown kind: its id never reads as automatic, so
+    // it is never removed. Only plain files are taken, and only ones older than this start.
+    private async Task ListBackupsFoundOnDiskAsync(DateTime startedUtc)
+    {
+        try
+        {
+            var folder = new DirectoryInfo(_opts.SaveDir);
+            if (!folder.Exists) return;
+            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var rows = _db.ListSnapshots(int.MaxValue);
+            var paths = rows.Select(r => Path.GetFullPath(r.FilePath)).ToHashSet(comparer);
+            var ids = rows.Select(r => r.SnapshotId).ToHashSet(StringComparer.Ordinal);
+            foreach (var file in folder.EnumerateFiles("*.zip"))
+            {
+                if (!string.Equals(file.Extension, ".zip", StringComparison.OrdinalIgnoreCase)) continue;
+                if ((file.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                if (file.LastWriteTimeUtc >= startedUtc || paths.Contains(file.FullName)) continue;
+                var nameHash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(file.FullName));
+                var id = ("found-" + Convert.ToHexString(nameHash).ToLowerInvariant()).Substring(0, 36);
+                if (!ids.Add(id)) continue;
+                try
+                {
+                    var hash = await Sha256OfAsync(file.FullName, CancellationToken.None).ConfigureAwait(false);
+                    _db.RecordSnapshot(new SnapshotRecord(id, new DateTimeOffset(file.LastWriteTimeUtc).ToUnixTimeSeconds(),
+                        file.FullName, file.Length, hash, 30));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // In use or unreadable: it stays where it is and is tried again at the next start.
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Listing only. It must never stop a start, and it changes no file.
+        }
     }
 
     private const string AutomaticRequester = "auto:filewatcher";
