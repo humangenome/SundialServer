@@ -123,7 +123,7 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
             if (now - _lastAutoSnapshotUtc < AutoSnapshotDebounce) return;
             // Wait briefly for Solarpunk to finish its write
             await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-            var rec = await SnapshotAsync(requestedBy: "auto:filewatcher", CancellationToken.None).ConfigureAwait(false);
+            var rec = await SnapshotAsync(requestedBy: AutomaticRequester, CancellationToken.None).ConfigureAwait(false);
             if (rec is not null)
             {
                 _lastAutoSnapshotUtc = now;
@@ -147,7 +147,9 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
     /// </summary>
     public async Task<SnapshotRecord?> SnapshotAsync(string requestedBy, CancellationToken ct = default)
     {
-        var snapshotId = $"snap-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}".Substring(0, 36);
+        // The stamp is the id's first part, set here only: no request can choose it.
+        var kind = requestedBy == AutomaticRequester ? AutomaticIdPrefix : "snap-";
+        var snapshotId = $"{kind}{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}".Substring(0, 36);
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         try
@@ -208,6 +210,16 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
         }
     }
 
+    private const string AutomaticRequester = "auto:filewatcher";
+    private const string AutomaticIdPrefix = "auto-";
+
+    // Only a backup stamped as automatic when it was taken may expire. One asked for, an upload, a copy taken before a
+    // restore, and any whose kind cannot be told (every one stored before the stamp) is never removed: it may be the
+    // only copy of that world, and a removal has no undo.
+    private static bool MayExpire(SnapshotRecord s) =>
+        s.SnapshotId.StartsWith(AutomaticIdPrefix, StringComparison.Ordinal) &&
+        string.Equals(Path.GetFileName(s.FilePath), s.SnapshotId + ".zip", StringComparison.Ordinal);
+
     private void RotateOldSnapshots()
     {
         try
@@ -216,6 +228,7 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
             var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             foreach (var s in snapshots)
             {
+                if (!MayExpire(s)) continue;
                 var ageSeconds = nowUnix - s.TakenUnix;
                 var maxSeconds = s.RetentionDays * 86_400;
                 if (ageSeconds <= maxSeconds) continue;
