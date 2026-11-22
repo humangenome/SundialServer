@@ -292,8 +292,9 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
                 try
                 {
                     var hash = await Sha256OfAsync(file.FullName, CancellationToken.None).ConfigureAwait(false);
+                    // 100 years: an older build expires every row by this field, and would take the owner's file with it.
                     _db.RecordSnapshot(new SnapshotRecord(id, new DateTimeOffset(file.LastWriteTimeUtc).ToUnixTimeSeconds(),
-                        file.FullName, file.Length, hash, 30));
+                        file.FullName, file.Length, hash, 36_500));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {

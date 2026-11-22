@@ -41,6 +41,7 @@ public sealed class FoundBackupsTests : IDisposable
             Assert.StartsWith("found-", r.SnapshotId);
             Assert.Equal(36, r.SnapshotId.Length);
             Assert.Equal(new FileInfo(r.FilePath).Length, r.SizeBytes);
+            Assert.True(r.RetentionDays >= 36_500, "an older build expires a row by its own days");
         });
 
         _s.Service.RotateOldSnapshots();
