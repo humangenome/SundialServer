@@ -79,7 +79,6 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
     {
         _log.LogInformation("Save orchestrator ready; db={Path}, save_dir={Dir}, snapshots_enabled={Enabled}",
             _dbPath, _opts.SaveDir, _opts.SnapshotsEnabled);
-        PruneOrphanedSaves();
         if (_opts.SnapshotsEnabled)
         {
             TryStartFileWatcher();
@@ -154,7 +153,7 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
             if (now - _lastAutoSnapshotUtc < AutoSnapshotDebounce) return;
             // Wait briefly for Solarpunk to finish its write
             await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-            var rec = await SnapshotAsync(requestedBy: "auto:filewatcher", CancellationToken.None).ConfigureAwait(false);
+            var rec = await SnapshotAsync(requestedBy: AutomaticRequester, CancellationToken.None).ConfigureAwait(false);
             if (rec is not null)
             {
                 _lastAutoSnapshotUtc = now;
@@ -178,7 +177,9 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
     /// </summary>
     public async Task<SnapshotRecord?> SnapshotAsync(string requestedBy, CancellationToken ct = default)
     {
-        var snapshotId = $"snap-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}".Substring(0, 36);
+        // The stamp is the id's first part, set here only: no request can choose it.
+        var kind = requestedBy == AutomaticRequester ? AutomaticIdPrefix : "snap-";
+        var snapshotId = $"{kind}{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}".Substring(0, 36);
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         try
@@ -239,11 +240,29 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
         }
     }
 
+    private const string AutomaticRequester = "auto:filewatcher";
+    private const string AutomaticIdPrefix = "auto-";
+
+    // Only a backup stamped as automatic when it was taken may be removed. One asked for, an upload, a copy taken
+    // before a restore, and any whose kind cannot be told (every one stored before the stamp) is never removed and
+    // takes none of the automatic ones' room: it may be the only copy of that world, and a removal has no undo.
+    private static bool IsAutomatic(SnapshotRecord s) =>
+        s.SnapshotId.StartsWith(AutomaticIdPrefix, StringComparison.Ordinal) &&
+        string.Equals(Path.GetFileName(s.FilePath), s.SnapshotId + ".zip", StringComparison.Ordinal);
+
+    // MaxSnapshotBytes, or a tenth of the drive's free space when that is less. 0 turns the room off.
+    private long AutomaticRoomBytes()
+    {
+        var room = _opts.MaxSnapshotBytes;
+        if (room <= 0) return 0;
+        return FreeSpaceProbe(_opts.SaveDir) is long free ? Math.Max(1, Math.Min(room, free / 10)) : room;
+    }
+
     /// <summary>
-    /// Remove the snapshots past the room they may take, oldest first (<see cref="SnapshotBudget"/>: the newest
-    /// <c>MaxSnapshotsKept</c> within <c>MaxSnapshotBytes</c>, and 30 days). Runs after every snapshot, the
-    /// pre-restore copy included, and after every upload. The newest snapshot and one a restore is reading stay.
-    /// A zip is removed only when it sits directly in <c>SaveDir</c>, and its row goes with it.
+    /// Remove automatic backups past their room, oldest first (<see cref="SnapshotBudget"/>), and those past 30
+    /// days. Runs after every snapshot and upload. No other backup is removed or counted. The newest automatic one
+    /// and one a restore is reading stay. A zip is removed only when it sits directly in <c>SaveDir</c>, and its
+    /// row goes with it.
     /// </summary>
     internal void RotateOldSnapshots()
     {
@@ -252,10 +271,11 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
             string? reading;
             lock (_restoreSourceGate) reading = _restoreSource;
             var items = _db.ListSnapshots(int.MaxValue)
+                .Where(IsAutomatic)
                 .Select(s => new SnapshotBudget.Item(s.SnapshotId, s.TakenUnix, s.SizeBytes, s.RetentionDays, s.FilePath));
             var keep = reading is null ? Array.Empty<string>() : new[] { reading };
             foreach (var s in SnapshotBudget.ToRemove(items, DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                         _opts.MaxSnapshotsKept, _opts.MaxSnapshotBytes, keep))
+                         _opts.MaxSnapshotsKept, AutomaticRoomBytes(), keep))
             {
                 // The row stays while its zip does; the next pass tries again.
                 if (!TryRemoveSnapshotFile(s.FilePath)) continue;
@@ -268,7 +288,6 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
         {
             _log.LogWarning(ex, "Snapshot rotation pass failed");
         }
-        PruneOrphanedSaves();
     }
 
     // A snapshot zip is removed only when it sits directly in SaveDir, so a row can never send the removal anywhere
@@ -294,75 +313,6 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
             return false;
         }
     }
-
-    /// <summary>
-    /// The folder in SaveGames where the host mod sets aside the world files it replaces or finds stale at a start
-    /// (named <c>&lt;yyyyMMddHHmmss&gt;-...</c>).
-    /// </summary>
-    internal const string OrphanedSavesFolder = "_sundial_orphaned_saves";
-
-    /// <summary>
-    /// Nothing removed the set-aside world files, so <see cref="OrphanedSavesFolder"/> grew at every start (older
-    /// builds left hundreds). It now keeps the newest <c>MaxOrphanedSavesKept</c> files within
-    /// <c>MaxOrphanedSavesBytes</c>, the same rule as snapshots without the age limit; older ones go. Only plain
-    /// files directly in that folder are removed, only while SaveGames and the folder are real folders under a real
-    /// Saved folder (<see cref="RestoreFolders"/>), checked again before each removal. Runs at start and after every
-    /// snapshot rotation (every backup, pre-restore copy and upload).
-    /// </summary>
-    internal void PruneOrphanedSaves()
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(_opts.GameUserDir)) return;
-            var rule = FolderRule(_opts.GameUserDir);
-            var why = RestoreFolders.Problem(SavedDir, rule, out var realSaved);
-            var saveGames = why is null ? Path.Combine(realSaved, "SaveGames") : "";
-            var folder = why is null ? Path.Combine(saveGames, OrphanedSavesFolder) : "";
-            why ??= RestoreFolders.EntryProblem(saveGames) ?? RestoreFolders.EntryProblem(folder);
-            if (why is not null)
-            {
-                _log.LogWarning("Set-aside world files were not pruned: {Why}; nothing is removed through a link", why);
-                return;
-            }
-            if (!Directory.Exists(folder)) return;
-
-            var files = new DirectoryInfo(folder)
-                .EnumerateFiles("*", new EnumerationOptions { RecurseSubdirectories = false, AttributesToSkip = 0 })
-                .Where(f => (f.Attributes & FileAttributes.ReparsePoint) == 0)
-                .Select(f => new SnapshotBudget.Item(f.Name, SetAsideUnix(f), f.Length, OrphanedSavesNeverExpire, f.FullName))
-                .ToList();
-            var removed = 0;
-            long removedBytes = 0;
-            foreach (var item in SnapshotBudget.ToRemove(files, DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                         _opts.MaxOrphanedSavesKept, _opts.MaxOrphanedSavesBytes, Array.Empty<string>()))
-            {
-                RestoreFolders.CheckBeforeMove(SavedDir, rule, realSaved, saveGames, folder);
-                if (RestoreFolders.IsLink(item.FilePath)) continue;
-                File.Delete(item.FilePath);
-                removed++;
-                removedBytes += item.SizeBytes;
-            }
-            if (removed > 0)
-                _log.LogInformation("Removed {Count} older set-aside world file(s) from {Folder} ({Bytes} bytes); kept the newest {Kept}",
-                    removed, folder, removedBytes, files.Count - removed);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "Pruning the set-aside world files failed");
-        }
-    }
-
-    // Set-aside files carry the time they were set aside in their name; a file without it counts by its write time.
-    private static long SetAsideUnix(FileInfo f)
-    {
-        if (f.Name.Length >= 14 && DateTime.TryParseExact(f.Name[..14], "yyyyMMddHHmmss",
-                System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out var t))
-            return new DateTimeOffset(t).ToUnixTimeSeconds();
-        return new DateTimeOffset(f.LastWriteTimeUtc).ToUnixTimeSeconds();
-    }
-
-    // The age limit is for snapshots only; set-aside world files go by count and size.
-    private const long OrphanedSavesNeverExpire = 365L * 100;
 
     /// <summary>
     /// Zips the save tree to <paramref name="destinationPath"/> and returns the links in it that were
