@@ -55,7 +55,10 @@ public sealed class SolarpunkServerOptions
     /// <summary>See <see cref="MaxRestoreUnpackedBytes"/>.</summary>
     public long MaxRestoreEntryBytes { get; set; } = 2L * 1024 * 1024 * 1024;
 
-    /// <summary>See <see cref="MaxRestoreUnpackedBytes"/>. 0 turns the free-space check off.</summary>
+    /// <summary>
+    /// The free space a restore's unpack and any new backup or upload must leave on the drive. One that would
+    /// leave less is refused, and nothing is removed for it. 0 turns the free-space check off.
+    /// </summary>
     public long RestoreFreeSpaceFloorBytes { get; set; } = 2L * 1024 * 1024 * 1024;
 
     /// <summary>

@@ -207,6 +207,12 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
                 return null;
             }
 
+            if (!HasRoomForLiveSaves(sourceDir))
+            {
+                _log.LogWarning("Snapshot {Id} failed", snapshotId);
+                return null;
+            }
+
             var snapshotPath = Path.Combine(_opts.SaveDir, $"{snapshotId}.zip");
             var tmpPath = snapshotPath + ".tmp";
             var linksLeftOut = CreateSaveGamesZip(sourceDir, tmpPath, FolderRule(_opts.GameUserDir));
@@ -238,6 +244,25 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
             _log.LogError(ex, "Snapshot {Id} failed", snapshotId);
             return null;
         }
+    }
+
+    /// <summary>
+    /// False when writing this many bytes would leave less than <c>RestoreFreeSpaceFloorBytes</c> free on the
+    /// drive backups are kept on, the floor a restore's unpack keeps too. Nothing is removed to make room. An
+    /// unreadable drive and a floor of 0 refuse nothing, as in that check.
+    /// </summary>
+    internal bool HasRoomForBackup(long bytes)
+    {
+        var floor = _opts.RestoreFreeSpaceFloorBytes;
+        return floor <= 0 || FreeSpaceProbe(_opts.SaveDir) is not long free || free - bytes >= floor;
+    }
+
+    // The most a backup of the live saves can take: its files' own sizes, before packing.
+    private bool HasRoomForLiveSaves(string sourceDir)
+    {
+        if (_opts.RestoreFreeSpaceFloorBytes <= 0) return true;
+        var files = SnapshotWalk.PlainFiles(sourceDir, new List<string>(), out _, rule: FolderRule(_opts.GameUserDir));
+        return HasRoomForBackup(files.Sum(file => new FileInfo(file).Length));
     }
 
     private const string AutomaticRequester = "auto:filewatcher";
@@ -445,6 +470,21 @@ public sealed class SaveOrchestratorService : IHostedService, IDisposable
     private async Task<bool> StopAndSwapAsync(string zipPath, string requestedBy, string auditAction,
         SecondDriveRule rule, string realSaved, string saveGamesDir, CancellationToken ct)
     {
+        // No room for the copy taken before the swap: refused while the game still runs.
+        var liveSaves = Path.Combine(_opts.GameUserDir, "Saved", "SaveGames");
+        try
+        {
+            if (Directory.Exists(liveSaves) && !HasRoomForLiveSaves(liveSaves))
+            {
+                _log.LogWarning("Restore aborted: pre-restore snapshot failed");
+                return false;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // A save folder the walk refuses or can't read is answered by the copy below, as before.
+        }
+
         // 1. Stop Solarpunk first. Taking a snapshot BEFORE the kill would
         // capture whatever state Solarpunk was mid-writing — which on a save
         // tick is half a .sav. Kill, wait for exit, then snap.

@@ -562,6 +562,12 @@ public sealed class SolarpunkHttpService : BackgroundService
                 // The body is already on disk as a temp file. Just rename
                 // it into SaveDir under the canonical snapshot name.
                 Directory.CreateDirectory(_opts.SaveDir);
+                if (!_saves.HasRoomForBackup(body.SizeBytes))
+                {
+                    body.Dispose();
+                    await WriteJsonAsync(res, 507, new { error = "snapshot failed" });
+                    return;
+                }
                 var snapshotId = $"upload-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}".Substring(0, 36);
                 var finalPath = Path.Combine(_opts.SaveDir, $"{snapshotId}.zip");
                 File.Move(body.TempPath, finalPath);
