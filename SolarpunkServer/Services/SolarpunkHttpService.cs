@@ -262,6 +262,9 @@ public sealed class SolarpunkHttpService : BackgroundService
 
         _log.LogDebug("HTTP request {Method} {Path} from {Remote}", method, path, remote);
 
+        // A signed route's body on disk. Each route disposes it; the finally below disposes it
+        // again (a no-op then), so a route that throws never leaves the upload in the temp folder.
+        BufferedBody? signedBody = null;
         try
         {
             res.Headers["X-Solarpunk-Instance"] = _identity.InstanceId;
@@ -433,6 +436,7 @@ public sealed class SolarpunkHttpService : BackgroundService
             try
             {
                 body = await ValidateAuthAndBufferAsync(req, ct).ConfigureAwait(false);
+                signedBody = body;
             }
             catch (BodyTooLargeException)
             {
@@ -654,12 +658,14 @@ public sealed class SolarpunkHttpService : BackgroundService
             _log.LogError(ex, "HTTP {Method} {Path} threw", method, path);
             try
             {
-                await WriteJsonAsync(res, 500, new { error = ex.Message });
+                // Never the exception's text: it can carry a path on this machine.
+                await WriteJsonAsync(res, 500, new { error = "internal error" });
             }
             catch { }
         }
         finally
         {
+            signedBody?.Dispose();
             try { _log.LogDebug("HTTP response {Method} {Path} -> {Status}", method, path, res.StatusCode); }
             catch { }
             try { res.Close(); } catch { }
