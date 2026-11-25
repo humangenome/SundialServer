@@ -252,12 +252,19 @@ public sealed class RconHostedService : IHostedService
         return "usage: save snapshot | save list";
     }
 
-    private string BuildStatus()
+    private string BuildStatus() =>
+        FormatStatus(_opts.InstanceId, _opts.Transport, _state.Connection, _state.EffectivePlayerCount);
+
+    // The RCON `status` line. An invite-code server (Transport "eos") never loads the in-game plugin, so
+    // "plugin=disconnected" showed on every healthy one; with no plugin connected it now leaves the plugin
+    // field out. Join-by-IP servers keep it (Ryan 2026-11-25, question 48).
+    internal static string FormatStatus(string instanceId, string transport, PipeConnection? conn, int players)
     {
-        var conn = _state.Connection;
-        return conn is null
-            ? $"instance={_opts.InstanceId} plugin=disconnected players={_state.EffectivePlayerCount}"
-            : $"instance={_opts.InstanceId} plugin=connected pid={conn.PluginPid} version={conn.PluginVersion} players={_state.EffectivePlayerCount}";
+        if (conn is not null)
+            return $"instance={instanceId} plugin=connected pid={conn.PluginPid} version={conn.PluginVersion} players={players}";
+        return string.Equals(transport, "eos", StringComparison.OrdinalIgnoreCase)
+            ? $"instance={instanceId} players={players}"
+            : $"instance={instanceId} plugin=disconnected players={players}";
     }
 
     private string BuildPlayers() => FormatPlayers(_state.Players, _state.EffectivePlayerCount);
