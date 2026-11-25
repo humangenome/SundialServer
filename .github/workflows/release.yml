@@ -32,8 +32,9 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
 
+# Read-only by default; only the package job, which creates this repo's release, may write contents.
 permissions:
-  contents: write
+  contents: read
 
 env:
   # The UE4SS runtime is pinned as a file in vendor/ue4ss/, not as a URL.
@@ -55,6 +56,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # First step, before anything else runs, on a tag push: refuse any tag that is
+      # not a release version (every tag this repo has published is v and three
+      # numbers). The tag reaches the shell only through TAG, always quoted.
+      - name: Check tag
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "${TAG}" =~ ${pattern} ]]; then
+            echo "::error::refusing this tag: a release tag here is v and three numbers, like v1.2.3"
+            exit 1
+          fi
+          echo "tag ${TAG} is a release version"
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -62,11 +79,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
           else
-            echo "TAG=v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)" >> "$GITHUB_ENV"
+            tag="v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)"
           fi
+          # The same refusal as the first step, for the rehearsal's version too.
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "${tag}" =~ ${pattern} ]]; then
+            echo "::error::refusing this tag: a release tag here is v and three numbers, like v1.2.3"
+            exit 1
+          fi
+          echo "TAG=${tag}" >> "$GITHUB_ENV"
 
       - name: Guard the published source
         shell: bash
@@ -122,6 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           for pair in "vendor/ue4ss/UE4SS.dll ${UE4SS_SHA256}" "vendor/ue4ss/dwmapi.dll ${UE4SS_PROXY_SHA256}"; do
+            # shellcheck disable=SC2086 # pair is "file hash", split on purpose
             set -- $pair
             if [ ! -f "$1" ]; then
               echo "::error::pinned runtime missing: $1"
@@ -207,8 +232,26 @@ jobs:
     name: Package and publish
     needs: [guard, msvc-check]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 30
     steps:
+      # First step, before anything else runs, on a tag push: refuse any tag that is
+      # not a release version (every tag this repo has published is v and three
+      # numbers). The tag reaches the shell only through TAG, always quoted.
+      - name: Check tag
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "${TAG}" =~ ${pattern} ]]; then
+            echo "::error::refusing this tag: a release tag here is v and three numbers, like v1.2.3"
+            exit 1
+          fi
+          echo "tag ${TAG} is a release version"
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -216,11 +259,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
           else
-            echo "TAG=v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)" >> "$GITHUB_ENV"
+            tag="v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)"
           fi
+          # The same refusal as the first step, for the rehearsal's version too.
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "${tag}" =~ ${pattern} ]]; then
+            echo "::error::refusing this tag: a release tag here is v and three numbers, like v1.2.3"
+            exit 1
+          fi
+          echo "TAG=${tag}" >> "$GITHUB_ENV"
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v5
@@ -264,6 +314,7 @@ jobs:
             for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
               if [ -f "$f" ]; then sudo sed -i -E "s#http://(azure\.)?archive\.ubuntu\.com/ubuntu#$mirror#g" "$f"; fi
             done
+            # shellcheck disable=SC2086 # APT_OPTS is a word list, split on purpose
             if sudo -E timeout 180 apt-get $APT_OPTS update -q && sudo -E timeout 420 apt-get $APT_OPTS install -y -q --no-install-recommends g++-mingw-w64-x86-64; then ok=1; break; fi
             echo "apt install from $mirror failed; trying the next mirror"
           done
@@ -350,7 +401,7 @@ jobs:
 
       - name: Create the release
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: SundialServer ${{ github.ref_name }}
           files: |
@@ -359,11 +410,10 @@ jobs:
           body_path: release-body.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          # Author the release as HumanGenome rather than github-actions[bot].
-          # Falls back to the default token if the secret is ever removed -- the
-          # release still publishes, only the byline degrades, and a release
-          # author cannot be corrected afterwards.
-          token: ${{ secrets.HUMANGENOME_PAT || secrets.GITHUB_TOKEN }}
+          # The release is created in this repo, so the workflow's own token is enough
+          # (this job has permissions: contents: write). No account token on this step
+          # (Security 2026-11-25), so the release page names github-actions[bot] as author.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Rehearsal summary
         if: github.event_name != 'push'
@@ -382,7 +432,21 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # As in the other jobs: the tag reaches the shell only through this variable.
+    env:
+      TAG: ${{ github.ref_name }}
     steps:
+      # First step of this job too, so it never relies on the other jobs' check.
+      - name: Check tag
+        shell: bash
+        run: |
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "${TAG}" =~ ${pattern} ]]; then
+            echo "::error::refusing this tag: a release tag here is v and three numbers, like v1.2.3"
+            exit 1
+          fi
+          echo "tag ${TAG} is a release version"
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -392,7 +456,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release download "${GITHUB_REF_NAME}" -R "${{ github.repository }}" -D published --clobber
+          gh release download "${TAG}" -R "${{ github.repository }}" -D published --clobber
           ls -l published
 
       - name: The release carries only what this workflow built
@@ -401,8 +465,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          expected="$(printf 'SundialServer-%s.zip\nchecksums.txt\n' "${GITHUB_REF_NAME}" | sort)"
-          actual="$(gh release view "${GITHUB_REF_NAME}" -R "${{ github.repository }}" --json assets --jq '.assets[].name' | sort)"
+          expected="$(printf 'SundialServer-%s.zip\nchecksums.txt\n' "${TAG}" | sort)"
+          actual="$(gh release view "${TAG}" -R "${{ github.repository }}" --json assets --jq '.assets[].name' | sort)"
           echo "$actual"
           if [ "$expected" != "$actual" ]; then
             echo "::error::the release has assets this workflow did not build. Never attach a SundialServer asset by hand - hand-uploading is how v0.1.68 shipped a developer's home directory."
@@ -423,8 +487,8 @@ jobs:
           SUNDIAL_PRIVACY_RULES: ${{ secrets.SUNDIAL_PRIVACY_RULES }}
         run: |
           set -euo pipefail
-          zip="published/SundialServer-${GITHUB_REF_NAME}.zip"
-          python3 scripts/check-bundle-version.py "$zip" "${GITHUB_REF_NAME}"
+          zip="published/SundialServer-${TAG}.zip"
+          python3 scripts/check-bundle-version.py "$zip" "${TAG}"
           python3 scripts/verify-server-bundle.py "$zip"
           python3 scripts/check-cet-compat.py "$zip"
           python3 scripts/verify-bundle-privacy.py --require-rules "$zip"
