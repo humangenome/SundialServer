@@ -10,7 +10,7 @@ Include:
 - A description of the vulnerability
 - Steps to reproduce
 - Affected part (SolarpunkServer.exe, server mods or admin API)
-- SundialServer version (`solarpunk_version` from `GET /api/v1/health`, or `status` over RCON)
+- SundialServer version (`solarpunk_version` from `GET /api/v1/health`)
 - Whether the issue is currently being exploited
 
 We aim to acknowledge reports within 72 hours and provide a triage update within 7 days.

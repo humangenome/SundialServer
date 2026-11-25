@@ -4,7 +4,7 @@
 
 Open an issue. Include:
 
-- SundialServer version (`solarpunk_version` from `GET /api/v1/health`, or `status` over RCON)
+- SundialServer version (`solarpunk_version` from `GET /api/v1/health`)
 - Solarpunk build ID
 - Steps to reproduce
 - Server log excerpt (`logs\solarpunk-<date>.log`: one JSON object per line, rolled daily)
