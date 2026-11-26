@@ -20,19 +20,35 @@ name: Release
 #   never-publish policy  the repo's standing artifact policy
 #   asset set             nothing was attached by hand alongside it
 #
-# Never attach an asset to a SundialServer release by hand. The last job fails
-# if anything shows up that this workflow did not build.
+# Never attach an asset to a SundialServer release by hand. The read-back job
+# fails if anything shows up that this workflow did not build.
 #
-# workflow_dispatch runs everything except publication, against the version in
-# Directory.Build.props. Rehearse there rather than burning a tag.
+# The release page is made BY HAND, as a draft, before the tag is pushed (Security
+# 2026-11-25): title, and exactly the notes in .github/release-notes/<tag>.md. A
+# tag push then only fills that draft with the two files this run built. It never
+# creates, publishes or mirrors a release, and never marks one Latest: it refuses
+# when there is no draft for the tag, when there is more than one release for it,
+# when that release is already published, or when the draft's text differs from
+# the notes file. After the run: read the assets back by sha256, scan the draft
+# (oss-artifact-scan reads drafts with the maintainer's login), then publish by hand.
+#
+# workflow_dispatch runs everything except the draft, against the version in
+# Directory.Build.props. Rehearse there rather than burning a tag. With fill_draft
+# on, the rehearsal also fills a throwaway draft for that version (delete it after).
 
 on:
   push:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+    inputs:
+      fill_draft:
+        description: 'Also fill the hand-made draft release for the Directory.Build.props version (never published)'
+        type: boolean
+        default: false
 
-# Read-only by default; only the package job, which creates this repo's release, may write contents.
+# Read-only by default. The package job fills this repo's draft release and the verify job reads it
+# back; both need contents: write, because GitHub shows draft releases only to callers that can write.
 permissions:
   contents: read
 
@@ -73,7 +89,7 @@ jobs:
           echo "tag ${TAG} is a release version"
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Resolve the release tag
         shell: bash
@@ -177,7 +193,7 @@ jobs:
           cat release-body.md
 
       - name: Upload the release body
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: release-body
           path: release-body.md
@@ -192,7 +208,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Fetch MinHook at the pinned commit
         shell: pwsh
@@ -253,7 +269,7 @@ jobs:
           echo "tag ${TAG} is a release version"
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Resolve the release tag
         shell: bash
@@ -273,7 +289,7 @@ jobs:
           echo "TAG=${tag}" >> "$GITHUB_ENV"
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           global-json-file: global.json
 
@@ -394,32 +410,65 @@ jobs:
           cat checksums.txt
 
       - name: Download the release body
-        if: github.event_name == 'push'
-        uses: actions/download-artifact@v5
+        if: github.event_name == 'push' || inputs.fill_draft
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: release-body
 
-      - name: Create the release
-        if: github.event_name == 'push'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          name: SundialServer ${{ github.ref_name }}
-          files: |
-            dist/SundialServer-${{ github.ref_name }}.zip
-            dist/checksums.txt
-          body_path: release-body.md
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          # The release is created in this repo, so the workflow's own token is enough
-          # (this job has permissions: contents: write). No account token on this step
-          # (Security 2026-11-25), so the release page names github-actions[bot] as author.
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # Fill the draft made by hand. GitHub's look-up of a release by tag answers 404 for a draft,
+      # so a release action that looks one up that way makes a second release and publishes it.
+      # gh finds drafts. Nothing here publishes, edits the text, or touches Latest.
+      - name: Fill the hand-made draft release
+        if: github.event_name == 'push' || inputs.fill_draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          rels="$(gh api "repos/${REPO}/releases?per_page=100" --paginate \
+            | jq -s --arg t "${TAG}" 'add // [] | map(select(.tag_name == $t))')"
+          n="$(jq 'length' <<<"${rels}")"
+          if [ "${n}" -ne 1 ]; then
+            echo "::error::expected exactly one release for ${TAG} (a draft made by hand first), found ${n}; nothing was uploaded"
+            exit 1
+          fi
+          if [ "$(jq -r '.[0].draft' <<<"${rels}")" != "true" ]; then
+            echo "::error::the release for ${TAG} is already published; this workflow only fills a hand-made draft and never changes a published release"
+            exit 1
+          fi
+          jq -r '.[0].body // ""' <<<"${rels}" > draft-body.md
+          python3 -I - draft-body.md release-body.md <<'PY'
+          import sys
+          a, b = (open(f, encoding="utf-8").read().replace("\r\n", "\n").rstrip() for f in sys.argv[1:3])
+          if a != b:
+              print("::error::the draft's text differs from the notes file; fix the draft by hand, nothing was uploaded")
+              sys.exit(1)
+          PY
+          others="$(jq -r --arg z "SundialServer-${TAG}.zip" \
+            '.[0].assets[].name | select(. != $z and . != "checksums.txt")' <<<"${rels}")"
+          if [ -n "${others}" ]; then
+            echo "::error::the draft already holds files this workflow does not build: ${others}"
+            exit 1
+          fi
+          id="$(jq -r '.[0].id' <<<"${rels}")"
+          gh release upload "${TAG}" -R "${REPO}" --clobber "dist/SundialServer-${TAG}.zip" dist/checksums.txt
+          after="$(gh api "repos/${REPO}/releases/${id}")"
+          if [ "$(jq -r '.draft' <<<"${after}")" != "true" ]; then
+            echo "::error::release ${id} is no longer a draft after the upload"
+            exit 1
+          fi
+          jq -r '.assets[] | "\(.name) \(.size)"' <<<"${after}"
+          echo "Draft ${TAG} (release ${id}) holds this run's two files. Read them back, scan the draft, then publish by hand."
 
       - name: Rehearsal summary
         if: github.event_name != 'push'
         shell: bash
+        env:
+          FILL_DRAFT: ${{ inputs.fill_draft }}
         run: |
           echo "Rehearsal for ${TAG}: every gate passed and nothing was published."
+          if [ "${FILL_DRAFT}" = "true" ]; then echo "The draft for ${TAG} was filled: delete it after the check."; fi
           ls -l dist
 
   # The build log is not the acceptance test. Download what the release actually
@@ -427,18 +476,21 @@ jobs:
   # from the one that was gated is the failure this whole workflow exists to
   # prevent.
   verify:
-    name: Verify the published artifact
+    name: Verify the draft's files
     needs: package
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.fill_draft
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # As in the other jobs: the tag reaches the shell only through this variable.
-    env:
-      TAG: ${{ github.ref_name }}
+    # Write only because GitHub shows a draft release to writers alone; every step here only reads.
+    permissions:
+      contents: write
     steps:
       # First step of this job too, so it never relies on the other jobs' check.
       - name: Check tag
+        if: github.event_name == 'push'
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
           if [[ ! "${TAG}" =~ ${pattern} ]]; then
@@ -448,9 +500,41 @@ jobs:
           echo "tag ${TAG} is a release version"
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - name: Download the published asset
+      # As in the package job: the tag reaches the shell only through TAG.
+      - name: Resolve the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' Directory.Build.props | head -1)"
+          fi
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "${tag}" =~ ${pattern} ]]; then
+            echo "::error::refusing this tag: a release tag here is v and three numbers, like v1.2.3"
+            exit 1
+          fi
+          echo "TAG=${tag}" >> "$GITHUB_ENV"
+
+      - name: The release is still an unpublished draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          rels="$(gh api "repos/${REPO}/releases?per_page=100" --paginate \
+            | jq -s --arg t "${TAG}" 'add // [] | map(select(.tag_name == $t))')"
+          if [ "$(jq 'length' <<<"${rels}")" -ne 1 ] || [ "$(jq -r '.[0].draft' <<<"${rels}")" != "true" ]; then
+            echo "::error::${TAG} must be exactly one release, still a draft"
+            exit 1
+          fi
+          echo "${TAG} is one draft release"
+
+      - name: Download the draft's files
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -494,15 +578,6 @@ jobs:
           python3 scripts/verify-bundle-privacy.py --require-rules "$zip"
           python3 scripts/verify-published-artifacts.py "$zip"
 
-  # Last job: scan the release this run just published. It is created with the
-  # workflow's own token, which starts no other workflow, so the release-event
-  # scan would not run for it; the daily scan in artifact-scan.yml stays as well
-  # (Security 2026-11-25). Read-only and given no secrets.
-  scan:
-    name: Scan the published release
-    needs: [package, verify]
-    permissions:
-      contents: read
-    uses: ./.github/workflows/artifact-scan.yml
-    with:
-      tag: ${{ github.ref_name }}
+  # No scan job here: this run leaves a draft, which a read-only scan cannot see. Scan the
+  # draft by hand before publishing it (oss-artifact-scan scan.py --repo SundialServer
+  # --tag <tag> --full); artifact-scan.yml's daily run covers it once published.
